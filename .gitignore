@@ -1,0 +1,17 @@
+formation_control_env/
+venv/
+.venv/
+env/
+
+
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+.vscode/
+.idea/
+
+.DS_Store
+Thumbs.db
