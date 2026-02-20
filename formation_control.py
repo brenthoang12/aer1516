@@ -114,6 +114,7 @@ class FormationContainmentController:
 
     def mu_dot(self, t):
         """
+        [Probable error]
         Derivative of μ(t):
         μ̇(t) = h*T^h / (T-t)^(h+1)  for t < T
         """
