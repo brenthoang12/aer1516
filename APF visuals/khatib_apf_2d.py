@@ -21,13 +21,13 @@ from scipy.integrate import odeint
 # ============================================================
 
 # Attractive potential gain (higher = stronger attraction to goal)
-K_ATTR = 1.0
+K_ATTR = 0.1
 
 # Repulsive potential gain (higher = stronger repulsion from obstacles)
-K_REP = 5.0
+K_REP = 1
 
 # Distance of influence for obstacle repulsion
-RHO_0 = 2.0
+RHO_0 = 1
 
 # Start and goal positions
 START_POS = np.array([0.5, 0.5])
@@ -181,6 +181,36 @@ class PolygonObstacle(Obstacle2D):
         ax.add_patch(polygon)
 
 
+# Define obstacles
+OBSTACLES_REGULAR = [
+    CircleObstacle(center=(3.0, 7.0), radius=0.8),
+    CircleObstacle(center=(7.0, 3.0), radius=0.7),
+    RectangleObstacle(center=(5.0, 5.0), width=1.5, height=0.6, angle=0),
+    
+    # Horseshoe obstacle pointed down
+    # PolygonObstacle(vertices=[(2.0, 4.0), (4.0, 4.0), (4.0, 2.0), (3.5, 2.0), (3.5, 3.5), (2.5, 3.5), (2.5, 2.0), (2.0, 2.0)])
+    
+    # Horseshoe obstacle rotated 45 degrees clockwise
+    # PolygonObstacle(vertices=[(3.09, 4.38), (4.50, 2.96), (3.09, 1.55), (2.73, 1.90), (3.80, 2.96), (3.09, 3.67), (2.03, 2.61), (1.67, 2.96)]),
+]
+
+OBSTACLES_MINIMA = [
+    CircleObstacle(center=(3.0, 7.0), radius=0.8),
+    CircleObstacle(center=(7.0, 3.0), radius=0.7),
+    RectangleObstacle(center=(5.0, 5.0), width=1.5, height=0.6, angle=0),
+    
+    # Horseshoe obstacle rotated 45 degrees clockwise
+    PolygonObstacle(vertices=[(3.09, 4.38), (4.50, 2.96), (3.09, 1.55), (2.73, 1.90), (3.80, 2.96), (3.09, 3.67), (2.03, 2.61), (1.67, 2.96)]),
+]
+
+OBSTACLES_NARROWCORRIDOR = [
+    CircleObstacle(center=(2.0, 8.0), radius=0.8),
+    CircleObstacle(center=(8.0, 2.0), radius=0.7),
+    RectangleObstacle(center=(4, 6), width=3, height=0.9, angle=45),
+    RectangleObstacle(center=(5, 4), width=3, height=0.9, angle=45),
+]
+
+
 # ============================================================
 # POTENTIAL FIELD FUNCTIONS
 # ============================================================
@@ -238,8 +268,7 @@ def repulsive_force(x, y, obstacle, k_rep, rho_0, epsilon=1e-6):
     force_mag[inside] = k_rep * (1/distance[inside] - 1/rho_0) / (distance[inside]**2)
     
     # Compute gradient of distance (unit vector away from obstacle)
-    # Using finite differences
-    delta = 1  # Use larger step for better numerical stability
+    delta = 0.1  # Smaller step for accurate gradient at exact point location
     dist_x_plus = obstacle.distance(x + delta, y)
     dist_y_plus = obstacle.distance(x, y + delta)
     
@@ -421,42 +450,23 @@ def visualize_apf(obstacles, start=START_POS, goal=GOAL_POS,
     plt.tight_layout()
     return fig, ax
 
+def save_visualization(fig, algo, filename = None):
+    """Save the visualization to a file"""
+    if filename is None:
+        # Will generate a name based on the parameters used in the visualization
+        if algo == 'apf_khatib_2d':
+            filename = f'apf_kattr{K_ATTR}_krep{K_REP}_rho0{RHO_0}_res{GRID_RESOLUTION}_mass{ROBOT_MASS}_damp{ROBOT_DAMPING}.png'
+        if algo == 'safe_apf_2d':
+            filename = f'safe_apf_kattr{K_ATTR}_krep{K_REP}_rho0{RHO_0}_res{GRID_RESOLUTION}_mass{ROBOT_MASS}_damp{ROBOT_DAMPING}.png'
+    fig.savefig(filename, dpi=300, bbox_inches='tight')
 
 # ============================================================
 # EXAMPLE USAGE
 # ============================================================
 
 if __name__ == '__main__':
-    # Define obstacles
-    obstacles_regular = [
-        CircleObstacle(center=(3.0, 7.0), radius=0.8),
-        CircleObstacle(center=(7.0, 3.0), radius=0.7),
-        RectangleObstacle(center=(5.0, 5.0), width=1.5, height=0.6, angle=0),
-        
-        # Horseshoe obstacle pointed down
-        # PolygonObstacle(vertices=[(2.0, 4.0), (4.0, 4.0), (4.0, 2.0), (3.5, 2.0), (3.5, 3.5), (2.5, 3.5), (2.5, 2.0), (2.0, 2.0)])
-        
-        # Horseshoe obstacle rotated 45 degrees clockwise
-        # PolygonObstacle(vertices=[(3.09, 4.38), (4.50, 2.96), (3.09, 1.55), (2.73, 1.90), (3.80, 2.96), (3.09, 3.67), (2.03, 2.61), (1.67, 2.96)]),
-    ]
 
-    obstacles_minima = [
-        CircleObstacle(center=(3.0, 7.0), radius=0.8),
-        CircleObstacle(center=(7.0, 3.0), radius=0.7),
-        RectangleObstacle(center=(5.0, 5.0), width=1.5, height=0.6, angle=0),
-        
-        # Horseshoe obstacle rotated 45 degrees clockwise
-        PolygonObstacle(vertices=[(3.09, 4.38), (4.50, 2.96), (3.09, 1.55), (2.73, 1.90), (3.80, 2.96), (3.09, 3.67), (2.03, 2.61), (1.67, 2.96)]),
-    ]
-
-    obstacles_narrowCorridor = [
-        CircleObstacle(center=(2.0, 8.0), radius=0.8),
-        CircleObstacle(center=(8.0, 2.0), radius=0.7),
-        RectangleObstacle(center=(4, 6), width=3, height=0.9, angle=45),
-        RectangleObstacle(center=(5, 4), width=3, height=0.9, angle=45),
-    ]
-
-    obstacles  = obstacles_narrowCorridor # Change as needed
+    obstacles  = OBSTACLES_MINIMA # Change as needed
     # Create visualization
     fig, ax = visualize_apf(
         obstacles=obstacles,
