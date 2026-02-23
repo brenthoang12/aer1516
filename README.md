@@ -2,6 +2,12 @@
 
 Implementation of the paper: **"A Fixed-Time Formation-Containment Control Scheme for Multi-Agent Systems With Motion Planning: Applications to Quadcopter UAVs"** by Su et al. (2024), IEEE Transactions on Vehicular Technology.
 
+## TODO
+
+1. The "formation_control.py" doesn't have scaling vector for choke point navigation
+2. Rotation matrix needs both counterclock wise and clockwise rotation. We still need to implement angle between relative position vector between obstacle and virtual leader agent.
+3. Set up experiment so that the initial formation of UAVs are random to force them to the desired formation.  
+
 ## Overview
 
 This is a 2D top-down simulation of quadcopter agents performing fixed-time formation-containment control with obstacle avoidance.

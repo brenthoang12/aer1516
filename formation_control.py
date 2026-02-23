@@ -310,6 +310,8 @@ class MotionPlanner:
 
     def curl_free_vector_field(self):
         """
+        [TODO: need counter clockwise]
+        
         Compute curl-free vector field to avoid local minima (Eq. 36-38).
         ∇Uc = R * ∇Ub
 
