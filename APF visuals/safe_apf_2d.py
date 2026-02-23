@@ -18,11 +18,8 @@ from khatib_apf_2d import (
     attractive_force,
     repulsive_potential,
     repulsive_force,
-    compute_path,
-    visualize_apf,
-    CircleObstacle,
-    RectangleObstacle,
-    PolygonObstacle,
+    compute_path_from_field,
+    save_visualization,
     # Parameters
     K_ATTR,
     K_REP,
@@ -33,11 +30,8 @@ from khatib_apf_2d import (
     GRID_MAX,
     GRID_RESOLUTION,
     ARROW_DENSITY_RATIO,
-    PATH_STEP_SIZE,
-    PATH_MAX_STEPS,
-    PATH_GOAL_TOLERANCE,
     ROBOT_MASS,
-    ROBOT_DAMPING,
+    ROBOT_DAMPING_COEFF,
     OBSTACLES_REGULAR,
     OBSTACLES_MINIMA,
     OBSTACLES_NARROWCORRIDOR
@@ -64,7 +58,7 @@ ROTATION_GAIN = 1.0
 # ============================================================
 # VORTEX REPULSIVE FIELD FUNCTIONS
 # ============================================================
-
+'''
 def vortex_repulsive_potential(distance, k_vortex, rho_0, epsilon=1e-6):
     """
     Vortex repulsive potential field.
@@ -91,6 +85,7 @@ def vortex_repulsive_potential(distance, k_vortex, rho_0, epsilon=1e-6):
     
     return potential
 
+'''
 
 def vortex_window_function(distance, d_safe, d_vort):
     """
@@ -196,316 +191,12 @@ def vortex_repulsive_force(x, y, obstacle, k_vortex, d_safe, d_vort, epsilon=1e-
 
 
 # ============================================================
-# SAFE ROTATION MATRIX
-# ============================================================
-'''
-def compute_safe_rotation_angle(x, y, obstacles, k_rep, rho_0, k_vortex, d_safe, d_vort,
-                                rotation_gain=ROTATION_GAIN, epsilon=1e-6):
-    """
-    Compute the rotation angle for the SAFE rotation matrix.
-    
-    The rotation angle is determined by the cumulative effect of all nearby obstacles.
-    Obstacles closer to the robot and within the influence zone have more effect on the rotation.
-    
-    Args:
-        x, y: robot position
-        obstacles: list of Obstacle2D objects
-        k_rep: repulsive force gain
-        rho_0: repulsive influence distance
-        k_vortex: vortex field strength
-        rotation_gain: blending factor for rotation (0-1)
-        epsilon: small value to avoid division by zero
-    
-    Returns:
-        theta: rotation angle in radians
-    """
-    fx_rep_total = 0.0
-    fy_rep_total = 0.0
-    fx_vortex_total = 0.0
-    fy_vortex_total = 0.0
-    
-    # Accumulate all repulsive and vortex forces
-    for obstacle in obstacles:
-        fx_rep, fy_rep = repulsive_force(x, y, obstacle, k_rep, rho_0, epsilon)
-        fx_vortex, fy_vortex = vortex_repulsive_force(x, y, obstacle, k_vortex, d_safe, d_vort, epsilon)
-        
-        # Handle both scalar and array cases
-        if isinstance(fx_rep, np.ndarray):
-            fx_rep_total += fx_rep[0] if fx_rep.ndim > 0 else fx_rep
-            fy_rep_total += fy_rep[0] if fy_rep.ndim > 0 else fy_rep
-        else:
-            fx_rep_total += fx_rep
-            fy_rep_total += fy_rep
-            
-        if isinstance(fx_vortex, np.ndarray):
-            fx_vortex_total += fx_vortex[0] if fx_vortex.ndim > 0 else fx_vortex
-            fy_vortex_total += fy_vortex[0] if fy_vortex.ndim > 0 else fy_vortex
-        else:
-            fx_vortex_total += fx_vortex
-            fy_vortex_total += fy_vortex
-    
-    # Magnitude of repulsive force indicates obstacle proximity
-    rep_mag = np.sqrt(fx_rep_total**2 + fy_rep_total**2)
-    
-    # Only compute rotation if there is repulsive force (near obstacles)
-    if rep_mag < epsilon:
-        return 0.0
-    
-    # Rotation angle determined by vortex field
-    # Angles are weighted by the magnitude of repulsive force
-    if rep_mag > epsilon:
-        # Clamp rotation gain to [0, 1]
-        blend = np.clip(rotation_gain, 0.0, 1.0)
-        
-        # Compute angle from vortex forces
-        vortex_angle = np.arctan2(fy_vortex_total, fx_vortex_total)
-        rep_angle = np.arctan2(fy_rep_total, fx_rep_total)
-        
-        # Rotation angle is the difference, scaled by blend factor
-        theta = blend * (vortex_angle - rep_angle)
-    else:
-        theta = 0.0
-    
-    return theta
-
-
-def apply_safe_rotation(fx_attr, fy_attr, rotation_angle):
-    """
-    Apply SAFE rotation matrix to the attractive force.
-    
-    The rotation matrix rotates the attractive force based on the repulsive environment,
-    allowing better navigation around obstacles while still being drawn toward the goal.
-    
-    Rotation matrix (2D):
-    [cos(θ)  -sin(θ)] [fx_attr]
-    [sin(θ)   cos(θ)] [fy_attr]
-    
-    Args:
-        fx_attr, fy_attr: attractive force components
-        rotation_angle: rotation angle in radians
-    
-    Returns:
-        fx_rotated, fy_rotated: rotated force components
-    """
-    cos_theta = np.cos(rotation_angle)
-    sin_theta = np.sin(rotation_angle)
-    
-    # Apply 2D rotation matrix
-    fx_rotated = cos_theta * fx_attr - sin_theta * fy_attr
-    fy_rotated = sin_theta * fx_attr + cos_theta * fy_attr
-    
-    return fx_rotated, fy_rotated
-
-
-# ============================================================
-# TOTAL SAFE APF FORCE
-# ============================================================
-
-def total_safe_force(x, y, goal, obstacles, k_attr, k_rep, rho_0, 
-                     k_vortex=K_VORTEX, d_safe=D_SAFE, d_vort=D_VORT,
-                     rotation_gain=ROTATION_GAIN, epsilon=1e-6):
-    """
-    Compute total SAFE APF force combining:
-    1. Attractive force (toward goal)
-    2. Repulsive force (away from obstacles)
-    3. Vortex repulsive force (tangential, helps navigate around obstacles)
-    4. SAFE rotation matrix (blends attractive and vortex fields)
-    
-    Args:
-        x, y: robot position
-        goal: goal position [x_goal, y_goal]
-        obstacles: list of Obstacle2D objects
-        k_attr: attractive force gain
-        k_rep: repulsive force gain
-        rho_0: repulsive influence distance
-        k_vortex: vortex field strength
-        rotation_gain: SAFE rotation blending factor
-        epsilon: small value to avoid division by zero
-    
-    Returns:
-        fx_total, fy_total: total force components
-    """
-    # Compute attractive force
-    fx_attr, fy_attr = attractive_force(x, y, goal[0], goal[1], k_attr)
-    
-    # Compute SAFE rotation angle based on obstacles
-    theta = compute_safe_rotation_angle(x, y, obstacles, k_rep, rho_0, 
-                                       k_vortex, d_safe, d_vort, rotation_gain, epsilon)
-    
-    # Apply SAFE rotation to attractive force
-    fx_attr_rot, fy_attr_rot = apply_safe_rotation(fx_attr, fy_attr, theta)
-    
-    # Start with rotated attractive force
-    fx_total = fx_attr_rot
-    fy_total = fy_attr_rot
-    
-    # Add repulsive and vortex forces from all obstacles
-    for obstacle in obstacles:
-        fx_rep, fy_rep = repulsive_force(x, y, obstacle, k_rep, rho_0, epsilon)
-        fx_vortex, fy_vortex = vortex_repulsive_force(x, y, obstacle, k_vortex, d_safe, d_vort, epsilon)
-        
-        fx_total = fx_total + fx_rep + fx_vortex
-        fy_total = fy_total + fy_rep + fy_vortex
-    
-    return fx_total, fy_total
-'''
-
-# ============================================================
 # SAFE PATH PLANNING
 # ============================================================
-
-def compute_safe_path(start, goal, obstacles, k_attr, k_rep, rho_0, 
-                      k_vortex=K_VORTEX, d_safe=D_SAFE, d_vort=D_VORT,
-                      rotation_gain=ROTATION_GAIN,
-                      step_size=PATH_STEP_SIZE, max_steps=PATH_MAX_STEPS, 
-                      goal_tolerance=PATH_GOAL_TOLERANCE,
-                      mass=ROBOT_MASS, damping=ROBOT_DAMPING):
-    """
-    Compute path from start to goal using SAFE APF with robot dynamics.
-    
-    Includes momentum and damping for realistic motion while leveraging
-    the vortex and rotation fields for better obstacle navigation.
-    
-    Args:
-        start: starting position [x, y]
-        goal: goal position [x, y]
-        obstacles: list of Obstacle2D objects
-        k_attr: attractive force gain
-        k_rep: repulsive force gain
-        rho_0: repulsive influence distance
-        k_vortex: vortex field strength
-        rotation_gain: SAFE rotation blending factor
-        step_size: integration step size
-        max_steps: maximum number of steps
-        goal_tolerance: distance to goal for convergence
-        mass: robot mass (for dynamics)
-        damping: velocity damping coefficient
-    
-    Returns:
-        path: numpy array of [N, 2] waypoints
-    """
-    path = [start.copy()]
-    pos = start.copy()
-    vel = np.array([0.0, 0.0])
-    
-    for step in range(max_steps):
-        # Compute SAFE APF force at current position
-        fx, fy = total_safe_force(pos[0], pos[1], goal, obstacles, 
-                                 k_attr, k_rep, rho_0, k_vortex, d_safe, d_vort, rotation_gain)
-        force = np.array([fx, fy])
-        
-        # Check if force is negligible
-        force_norm = np.sqrt(fx**2 + fy**2)
-        if force_norm < 1e-6:
-            break
-        
-        # Compute acceleration: a = F / m
-        accel = force / mass
-        
-        # Apply damping to velocity
-        vel = vel * (1.0 - damping)
-        
-        # Update velocity
-        vel = vel + accel * step_size
-        
-        # Update position
-        pos = pos + vel * step_size
-        path.append(pos.copy())
-        
-        # Check if goal reached and velocity settled
-        dist_to_goal = np.linalg.norm(pos - goal)
-        vel_magnitude = np.linalg.norm(vel)
-        if dist_to_goal < goal_tolerance and vel_magnitude < 0.05:
-            path.append(goal.copy())
-            break
-    
-    return np.array(path)
-
 
 # ============================================================
 # SAFE APF VISUALIZATION
 # ============================================================
-
-def compute_safe_path_from_field(start, goal, X, Y, Fx, Fy,
-                                  step_size=PATH_STEP_SIZE, max_steps=PATH_MAX_STEPS,
-                                  goal_tolerance=PATH_GOAL_TOLERANCE,
-                                  mass=ROBOT_MASS, damping=ROBOT_DAMPING,
-                                  grid_min=GRID_MIN, grid_max=GRID_MAX):
-    """
-    Compute path from start to goal by following the pre-computed force field grid.
-    
-    Uses bilinear interpolation to sample forces at arbitrary positions along the path,
-    following the exact vector field shown in the visualization without recomputing forces.
-    
-    Args:
-        start: starting position [x, y]
-        goal: goal position [x, y]
-        X, Y: grid coordinates (from np.meshgrid)
-        Fx, Fy: pre-computed force fields at grid points
-        step_size: integration step size
-        max_steps: maximum number of steps
-        goal_tolerance: distance to goal for convergence
-        mass: robot mass (for dynamics)
-        damping: velocity damping coefficient
-        grid_min, grid_max: grid bounds for interpolation boundary checking
-    
-    Returns:
-        path: numpy array of [N, 2] waypoints
-    """
-    from scipy.interpolate import RectBivariateSpline
-    
-    # Create interpolation functions for force field
-    # RectBivariateSpline expects 1D x, 1D y coordinates
-    x_grid = X[0, :]  # First row contains all x values
-    y_grid = Y[:, 0]  # First column contains all y values
-    
-    # Create 2D splines for force interpolation
-    fx_interp = RectBivariateSpline(y_grid, x_grid, Fx, kx=1, ky=1)
-    fy_interp = RectBivariateSpline(y_grid, x_grid, Fy, kx=1, ky=1)
-    
-    path = [start.copy()]
-    pos = start.copy()
-    vel = np.array([0.0, 0.0])
-    
-    for step in range(max_steps):
-        # Clamp position to grid bounds to avoid extrapolation
-        px_clamped = np.clip(pos[0], grid_min, grid_max)
-        py_clamped = np.clip(pos[1], grid_min, grid_max)
-        
-        # Sample force field at current position using interpolation
-        # Note: RectBivariateSpline expects (y, x) order
-        fx = float(fx_interp(py_clamped, px_clamped)[0, 0])
-        fy = float(fy_interp(py_clamped, px_clamped)[0, 0])
-        
-        force = np.array([fx, fy])
-        force_norm = np.sqrt(fx**2 + fy**2)
-        
-        # Check if force is negligible
-        if force_norm < 1e-6:
-            break
-        
-        # Compute acceleration: a = F / m
-        accel = force / mass
-        
-        # Apply damping to velocity
-        vel = vel * (1.0 - damping)
-        
-        # Update velocity
-        vel = vel + accel * step_size
-        
-        # Update position
-        pos = pos + vel * step_size
-        path.append(pos.copy())
-        
-        # Check if goal reached and velocity settled
-        dist_to_goal = np.linalg.norm(pos - goal)
-        vel_magnitude = np.linalg.norm(vel)
-        if dist_to_goal < goal_tolerance and vel_magnitude < 0.05:
-            path.append(goal.copy())
-            break
-    
-    return np.array(path)
-
 
 def visualize_safe_apf(obstacles, start=START_POS, goal=GOAL_POS,
                        k_attr=K_ATTR, k_rep=K_REP, rho_0=RHO_0,
@@ -567,9 +258,6 @@ def visualize_safe_apf(obstacles, start=START_POS, goal=GOAL_POS,
                 Fx[i, j] += fx_rep + fx_vortex
                 Fy[i, j] += fy_rep + fy_vortex
             
-            # Apply SAFE rotation
-            # theta = compute_safe_rotation_angle(xi, yi, obstacles, k_rep, rho_0, k_vortex, d_safe, d_vort, rotation_gain)
-            # Fx[i, j], Fy[i, j] = apply_safe_rotation(Fx[i, j], Fy[i, j], theta)
     
     # # Plot potential contours
     # contour_levels = np.linspace(U.min(), np.percentile(U, 95), 20)
@@ -602,11 +290,11 @@ def visualize_safe_apf(obstacles, start=START_POS, goal=GOAL_POS,
     ax.plot(goal[0], goal[1], 'b*', markersize=20, label='Goal', zorder=10)
     
     # Compute and plot path following the pre-computed force field
-    path = compute_safe_path_from_field(start, goal, X, Y, Fx, Fy, 
+    path = compute_path_from_field(start, goal, X, Y, Fx, Fy, 
                                          grid_min=grid_min, grid_max=grid_max)
     if len(path) > 1:
         ax.plot(path[:, 0], path[:, 1], 'g--', linewidth=2, 
-               label='SAFE Path (from field)', alpha=0.7, zorder=8)
+               label='Path (from field)', alpha=0.7, zorder=8)
     
     # Formatting
     ax.set_xlim(grid_min, grid_max)
@@ -648,3 +336,5 @@ if __name__ == '__main__':
     )
     
     plt.show()
+    filename = f'safe_apf_kattr{K_ATTR}_krep{K_REP}_rho0{RHO_0}_kvor{K_VORTEX}_d_safe{D_SAFE}_d_vort{D_VORT}_res{GRID_RESOLUTION}_mass{ROBOT_MASS}_damp{ROBOT_DAMPING_COEFF}.png'
+    save_visualization(fig, 'safe_apf_2d', filename)

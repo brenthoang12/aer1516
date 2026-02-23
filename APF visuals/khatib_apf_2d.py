@@ -24,10 +24,10 @@ from scipy.integrate import odeint
 K_ATTR = 0.1
 
 # Repulsive potential gain (higher = stronger repulsion from obstacles)
-K_REP = 1
+K_REP = 0.3
 
 # Distance of influence for obstacle repulsion
-RHO_0 = 1
+RHO_0 = 0.8
 
 # Start and goal positions
 START_POS = np.array([0.5, 0.5])
@@ -45,8 +45,8 @@ PATH_MAX_STEPS = 5000
 PATH_GOAL_TOLERANCE = 0.1
 
 # Robot dynamics parameters
-ROBOT_MASS = 0.3  # Vehicle mass (higher = more inertia, smoother motion)
-ROBOT_DAMPING = 0.3  # Velocity damping coefficient (0-1, higher = more damping/friction)
+ROBOT_MASS = 0.8  # Vehicle mass (higher = more inertia, smoother motion)
+ROBOT_DAMPING_COEFF = 1.1  # Velocity-dependent damping (higher = more viscous friction, 0.1-0.5 typical)
 
 # ============================================================
 # OBSTACLE DEFINITIONS
@@ -64,7 +64,6 @@ class Obstacle2D:
         """Plot the obstacle on matplotlib axis"""
         raise NotImplementedError
 
-
 class CircleObstacle(Obstacle2D):
     """Circular obstacle"""
     def __init__(self, center, radius):
@@ -79,7 +78,6 @@ class CircleObstacle(Obstacle2D):
         circle = patches.Circle((self.cx, self.cy), self.r, 
                                color=color, alpha=alpha, zorder=5)
         ax.add_patch(circle)
-
 
 class RectangleObstacle(Obstacle2D):
     """Axis-aligned rectangular obstacle with optional rotation"""
@@ -132,7 +130,6 @@ class RectangleObstacle(Obstacle2D):
         rect.set_xy((self.cx - self.w/2, self.cy - self.h/2))
         
         ax.add_patch(rect)
-
 
 class PolygonObstacle(Obstacle2D):
     """Polygonal obstacle (convex or concave)"""
@@ -204,8 +201,8 @@ OBSTACLES_MINIMA = [
 ]
 
 OBSTACLES_NARROWCORRIDOR = [
-    CircleObstacle(center=(2.0, 8.0), radius=0.8),
-    CircleObstacle(center=(8.0, 2.0), radius=0.7),
+    CircleObstacle(center=(2.0, 8.0), radius=1.0),
+    CircleObstacle(center=(7.0, 2.0), radius=1.5),
     RectangleObstacle(center=(4, 6), width=3, height=0.9, angle=45),
     RectangleObstacle(center=(5, 4), width=3, height=0.9, angle=45),
 ]
@@ -287,65 +284,89 @@ def repulsive_force(x, y, obstacle, k_rep, rho_0, epsilon=1e-6):
     return fx, fy
 
 
-def total_force(x, y, goal, obstacles, k_attr, k_rep, rho_0):
-    """
-    Compute total force as sum of attractive and repulsive forces
-    """
-    # Attractive force
-    fx_attr, fy_attr = attractive_force(x, y, goal[0], goal[1], k_attr)
-    fx_total = fx_attr
-    fy_total = fy_attr
-    
-    # Repulsive forces from all obstacles
-    for obstacle in obstacles:
-        fx_rep, fy_rep = repulsive_force(x, y, obstacle, k_rep, rho_0)
-        fx_total = fx_total + fx_rep
-        fy_total = fy_total + fy_rep
-    
-    return fx_total, fy_total
-
-
 # ============================================================
 # PATH PLANNING
 # ============================================================
-
-def compute_path(start, goal, obstacles, k_attr, k_rep, rho_0, 
-                step_size=PATH_STEP_SIZE, max_steps=PATH_MAX_STEPS, 
-                goal_tolerance=PATH_GOAL_TOLERANCE,
-                mass=ROBOT_MASS, damping=ROBOT_DAMPING):
+def compute_path_from_field(start, goal, X, Y, Fx, Fy,
+                                  step_size=PATH_STEP_SIZE, max_steps=PATH_MAX_STEPS,
+                                  goal_tolerance=PATH_GOAL_TOLERANCE,
+                                  mass=ROBOT_MASS, damping_coeff=ROBOT_DAMPING_COEFF,
+                                  grid_min=GRID_MIN, grid_max=GRID_MAX):
     """
-    Compute path from start to goal using robot dynamics (F = ma)
-    Includes momentum and damping for more realistic motion.
-    This creates jitter in narrow corridors due to oscillating repulsive forces.
+    Compute path from start to goal by following the pre-computed force field grid.
+    
+    Uses improved physics dynamics with:
+    - Velocity-dependent damping (more intuitive and less sensitive than multiplicative)
+    - Semi-implicit Euler integration for better stability
+    - Adaptive step sizing based on local force magnitude
+    - Bilinear interpolation for smooth force field sampling
+    
+    Args:
+        start: starting position [x, y]
+        goal: goal position [x, y]
+        X, Y: grid coordinates (from np.meshgrid)
+        Fx, Fy: pre-computed force fields at grid points
+        step_size: base integration step size
+        max_steps: maximum number of steps
+        goal_tolerance: distance to goal for convergence
+        mass: robot mass (kg, affects inertia)
+        damping_coeff: velocity-dependent damping coefficient (0.1-0.5 typical)
+        grid_min, grid_max: grid bounds for interpolation boundary checking
+    
+    Returns:
+        path: numpy array of [N, 2] waypoints
     """
+    from scipy.interpolate import RectBivariateSpline
+    
+    # Create interpolation functions for force field
+    # RectBivariateSpline expects 1D x, 1D y coordinates
+    x_grid = X[0, :]  # First row contains all x values
+    y_grid = Y[:, 0]  # First column contains all y values
+    
+    # Create 2D splines for force interpolation
+    fx_interp = RectBivariateSpline(y_grid, x_grid, Fx, kx=1, ky=1)
+    fy_interp = RectBivariateSpline(y_grid, x_grid, Fy, kx=1, ky=1)
+    
     path = [start.copy()]
     pos = start.copy()
-    vel = np.array([0.0, 0.0])  # Initial velocity is zero
+    vel = np.array([0.0, 0.0])
     
     for step in range(max_steps):
-        # Compute force at current position (not normalized)
-        fx, fy = total_force(pos[0], pos[1], goal, obstacles, k_attr, k_rep, rho_0)
-        force = np.array([fx, fy])
+        # Clamp position to grid bounds to avoid extrapolation
+        px_clamped = np.clip(pos[0], grid_min, grid_max)
+        py_clamped = np.clip(pos[1], grid_min, grid_max)
         
-        # Check if force is negligible (near equilibrium)
+        # Sample force field at current position using interpolation
+        # Note: RectBivariateSpline expects (y, x) order
+        fx = float(fx_interp(py_clamped, px_clamped)[0, 0])
+        fy = float(fy_interp(py_clamped, px_clamped)[0, 0])
+        
+        force = np.array([fx, fy])
         force_norm = np.sqrt(fx**2 + fy**2)
+        
+        # Check if force is negligible
         if force_norm < 1e-6:
             break
         
-        # Compute acceleration: a = F / m
-        accel = force / mass
+        # Adaptive step size: reduce step size in high-force regions for stability
+        # This prevents overshooting in narrow corridors
+        adaptive_dt = step_size / (1.0 + force_norm * step_size * 0.1)
         
-        # Apply damping to velocity: v = v * (1 - damping)
-        vel = vel * (1.0 - damping)
+        # Velocity-dependent damping force: F_damp = -c * v
+        # This is more physical and easier to tune than multiplicative damping
+        damping_force = -damping_coeff * vel
         
-        # Update velocity: v += a * dt (dt = step_size)
-        vel = vel + accel * step_size
+        # Compute total acceleration: a = (F_external + F_damping) / m
+        total_force = force + damping_force
+        accel = total_force / mass
         
-        # Update position: x += v * dt
-        pos = pos + vel * step_size
+        # Semi-implicit Euler integration (update velocity before position)
+        # This is more stable than standard Euler integration
+        vel = vel + accel * adaptive_dt
+        pos = pos + vel * adaptive_dt
         path.append(pos.copy())
         
-        # Check if goal reached and velocity is low (settled)
+        # Check if goal reached and velocity settled
         dist_to_goal = np.linalg.norm(pos - goal)
         vel_magnitude = np.linalg.norm(vel)
         if dist_to_goal < goal_tolerance and vel_magnitude < 0.05:
@@ -353,7 +374,6 @@ def compute_path(start, goal, obstacles, k_attr, k_rep, rho_0,
             break
     
     return np.array(path)
-
 
 # ============================================================
 # VISUALIZATION
@@ -431,8 +451,9 @@ def visualize_apf(obstacles, start=START_POS, goal=GOAL_POS,
     ax.plot(start[0], start[1], 'go', markersize=12, label='Start', zorder=10)
     ax.plot(goal[0], goal[1], 'b*', markersize=20, label='Goal', zorder=10)
     
-    # Compute and plot path
-    path = compute_path(start, goal, obstacles, k_attr, k_rep, rho_0)
+    # Compute and plot path following the pre-computed force field
+    path = compute_path_from_field(start, goal, X, Y, Fx, Fy, 
+                                         grid_min=grid_min, grid_max=grid_max)
     if len(path) > 1:
         ax.plot(path[:, 0], path[:, 1], 'g--', linewidth=2, 
                label='Planned Path', alpha=0.7, zorder=8)
@@ -450,15 +471,23 @@ def visualize_apf(obstacles, start=START_POS, goal=GOAL_POS,
     plt.tight_layout()
     return fig, ax
 
-def save_visualization(fig, algo, filename = None):
+def save_visualization(fig, obstacles, filename = None):
     """Save the visualization to a file"""
+    # Mapping of obstacle configuration ids to their abbreviations
+    obstacle_name_map = {
+        id(OBSTACLES_REGULAR): 'reg',
+        id(OBSTACLES_MINIMA): 'min',
+        id(OBSTACLES_NARROWCORRIDOR): 'nc',
+    }
+    
+    # Deduce which global obstacle configuration was passed
+    obstacles_abbrev = obstacle_name_map.get(id(obstacles), 'custom')
+    
     if filename is None:
         # Will generate a name based on the parameters used in the visualization
-        if algo == 'apf_khatib_2d':
-            filename = f'apf_kattr{K_ATTR}_krep{K_REP}_rho0{RHO_0}_res{GRID_RESOLUTION}_mass{ROBOT_MASS}_damp{ROBOT_DAMPING}.png'
-        if algo == 'safe_apf_2d':
-            filename = f'safe_apf_kattr{K_ATTR}_krep{K_REP}_rho0{RHO_0}_res{GRID_RESOLUTION}_mass{ROBOT_MASS}_damp{ROBOT_DAMPING}.png'
-    fig.savefig(filename, dpi=300, bbox_inches='tight')
+        filename = f'apf_kattr{K_ATTR}_krep{K_REP}_rho0{RHO_0}_res{GRID_RESOLUTION}_mass{ROBOT_MASS}_dampcoeff{ROBOT_DAMPING_COEFF}_{obstacles_abbrev}.png'
+    
+    fig.savefig(f'imgs/{filename}', dpi=300, bbox_inches='tight')
 
 # ============================================================
 # EXAMPLE USAGE
@@ -466,7 +495,7 @@ def save_visualization(fig, algo, filename = None):
 
 if __name__ == '__main__':
 
-    obstacles  = OBSTACLES_MINIMA # Change as needed
+    obstacles  = OBSTACLES_NARROWCORRIDOR # Change as needed
     # Create visualization
     fig, ax = visualize_apf(
         obstacles=obstacles,
@@ -481,3 +510,4 @@ if __name__ == '__main__':
     )
     
     plt.show()
+    save_visualization(fig, obstacles, None)
