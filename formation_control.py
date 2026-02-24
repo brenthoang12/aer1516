@@ -125,6 +125,7 @@ class FormationContainmentController:
 
     def compute_formation_error(self, agent):
         """
+        [shouldn't have virtual leader as the paper suggested]
         Compute formation tracking error for a leader agent.
         ξᵢ = Σⱼ∈Nᵢ aᵢⱼ(pᵢ - pⱼ - δᵢⱼ)
         """
@@ -311,7 +312,7 @@ class MotionPlanner:
     def curl_free_vector_field(self):
         """
         [TODO: need counter clockwise]
-        
+
         Compute curl-free vector field to avoid local minima (Eq. 36-38).
         ∇Uc = R * ∇Ub
 

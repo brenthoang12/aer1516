@@ -7,6 +7,7 @@ Implementation of the paper: **"A Fixed-Time Formation-Containment Control Schem
 1. The "formation_control.py" doesn't have scaling vector for choke point navigation
 2. Rotation matrix needs both counterclock wise and clockwise rotation. We still need to implement angle between relative position vector between obstacle and virtual leader agent.
 3. Set up experiment so that the initial formation of UAVs are random to force them to the desired formation.  
+4. Go through adjacency matrix 
 
 ## Overview
 
