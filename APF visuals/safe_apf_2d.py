@@ -316,7 +316,7 @@ def visualize_safe_apf(obstacles, start=START_POS, goal=GOAL_POS,
 
 if __name__ == '__main__':
     # Define obstacles - same as in Khatib APF
-    obstacles = OBSTACLES_NARROWCORRIDOR
+    obstacles = OBSTACLES_MINIMA
 
     # Create visualization
     fig, ax = visualize_safe_apf(

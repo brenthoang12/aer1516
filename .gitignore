@@ -2,7 +2,7 @@ formation_control_env/
 venv/
 .venv/
 env/
-
+imgs/
 
 __pycache__/
 *.py[cod]

@@ -45,8 +45,8 @@ PATH_MAX_STEPS = 5000
 PATH_GOAL_TOLERANCE = 0.1
 
 # Robot dynamics parameters
-ROBOT_MASS = 0.8  # Vehicle mass (higher = more inertia, smoother motion)
-ROBOT_DAMPING_COEFF = 1.1  # Velocity-dependent damping (higher = more viscous friction, 0.1-0.5 typical)
+ROBOT_MASS = 0.5  # Vehicle mass (higher = more inertia, smoother motion)
+ROBOT_DAMPING_COEFF = 1.2  # Velocity-dependent damping (higher = more viscous friction, 0.1-0.5 typical)
 
 # ============================================================
 # OBSTACLE DEFINITIONS
