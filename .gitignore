@@ -12,7 +12,12 @@ build/
 
 .vscode/
 .idea/
+.python-version
 
 .DS_Store
 Thumbs.db
 *.pdf
+
+# pixi environments
+.pixi/*
+!.pixi/config.toml

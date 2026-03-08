@@ -1,0 +1,14 @@
+[workspace]
+authors = ["marcbishara <6134115+marcbishara@users.noreply.github.com>"]
+channels = ["conda-forge"]
+name = "project_RACE"
+platforms = ["linux-64"]
+version = "0.1.0"
+
+[tasks]
+
+[dependencies]
+python = "3.13.*"
+
+[pypi-dependencies]
+crazyflow = { path = "/home/marcbishara/codefiles/wndsCodeFiles/aer1516/project_RACE/crazyflow", editable = true }
