@@ -8,7 +8,15 @@ version = "0.1.0"
 [tasks]
 
 [dependencies]
-python = "3.13.*"
+python = ">=3.11,<3.14"
+pip = "*"
 
 [pypi-dependencies]
-crazyflow = { path = "/home/marcbishara/codefiles/wndsCodeFiles/aer1516/project_RACE/crazyflow", editable = true }
+crazyflow = { path = "./crazyflow", editable = true }
+
+[feature.gpu.pypi-dependencies]
+crazyflow = { path = "./crazyflow", editable = true, extras = ["gpu"] }
+
+[environments]
+default = { solve-group = "default" }
+gpu = { features = ["gpu"], solve-group = "default" }
