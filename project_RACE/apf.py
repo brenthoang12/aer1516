@@ -1,5 +1,8 @@
 from dataclasses import dataclass, field
+from pathlib import Path
 
+import imageio.v3 as iio
+from datetime import datetime 
 import numpy as np
 import os
 import glfw
@@ -134,13 +137,21 @@ K_REP_OBS  = 1.2    # repulsive gain - sphere obstacles
 D_REP      = 0.4    # influence distance from walls / obstacle surface (m)
 STEP_LEN   = 0.1   # gradient-descent step size (m)
 GOAL_TOL   = 0.08   # goal-reached tolerance (m)
-PREVIEW_STEPS = 30
+PREVIEW_STEPS = 10
 
 # Simulation
 SIM_FREQ    = 500
 STATE_FREQ  = 100
 CTRL_FREQ   = 50
-SIM_DURATION = 40.0
+SIM_DURATION = 20.0
+
+CAPTURE_DIR = Path(__file__).resolve().parent / "captures"
+CAPTURE_FPS = 24
+CAPTURE_WIDTH = 1280
+CAPTURE_HEIGHT = 720
+CAPTURE_CAMERA = -1
+SAVE_VIDEO = False
+SHOW_WINDOW = True
 
 
 # ---------------------------------------------------------------------------
@@ -291,8 +302,11 @@ def main():
     )
 
     cmd = np.zeros((1, 1, 13))
-    fps = 24
+    fps = CAPTURE_FPS
     steps_per_ctrl = sim.freq // CTRL_FREQ
+
+    preview_path = initial_preview
+    video_frames = []
 
     print("Simulating...")
     try:
@@ -301,17 +315,29 @@ def main():
             update_obstacles(obstacles, t, 1.0 / CTRL_FREQ)
             pos = np.array(sim.data.states.pos[0, 0])
             next_target = apf_step(pos, GOAL, obstacles)
-            preview_path = rollout_preview(pos, GOAL, obstacles)
 
             cmd[0, 0, :3] = next_target
             sim.state_control(cmd)
             sim.step(steps_per_ctrl)
 
             if (i * fps) % CTRL_FREQ < fps:
+                preview_path = rollout_preview(pos, GOAL, obstacles)
                 draw_scene(sim, preview_path, obstacles)
-                sim.render(width=960, height=540)
-                # sim.render(width=1280, height=720)
-
+                if SAVE_VIDEO:
+                    frame = sim.render(
+                        mode="rgb_array",
+                        camera=CAPTURE_CAMERA,
+                        width=CAPTURE_WIDTH,
+                        height=CAPTURE_HEIGHT,
+                    )
+                    if frame is not None:
+                        video_frames.append(frame)
+                if SHOW_WINDOW:
+                    sim.render(
+                        camera=CAPTURE_CAMERA,
+                        width=CAPTURE_WIDTH,
+                        height=CAPTURE_HEIGHT,
+                    )
 
             if np.linalg.norm(pos - GOAL) < GOAL_TOL:
                 print(f"Goal reached! t={i / CTRL_FREQ:.2f}s")
@@ -319,6 +345,12 @@ def main():
         else:
             print("Time limit reached.")
     finally:
+        if SAVE_VIDEO and video_frames:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            CAPTURE_DIR.mkdir(parents=True, exist_ok=True)
+            output_path = CAPTURE_DIR / f"apf_capture_Cam{CAPTURE_CAMERA}_{timestamp}.mp4"
+            iio.imwrite(output_path, video_frames, fps=CAPTURE_FPS)
+            print(f"Saved capture to {output_path}")
         sim.close()
 
 

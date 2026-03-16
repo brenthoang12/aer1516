@@ -13,6 +13,7 @@ pip = "*"
 
 [pypi-dependencies]
 crazyflow = { path = "./crazyflow", editable = true }
+imageio-ffmpeg = "*"
 
 [feature.gpu.pypi-dependencies]
 crazyflow = { path = "./crazyflow", editable = true, extras = ["gpu"] }
