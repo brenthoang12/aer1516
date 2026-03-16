@@ -21,6 +21,12 @@ BORDER_MAX = np.array([3.0, 3.0, 2.0])
 START = np.array([0.3, 0.3, 0.5])
 GOAL  = np.array([2.7, 2.7, 1.5])
 
+FREE_CAM = {
+    "lookat": np.array([0.985476, 0.028079, 1.615372]),
+    "distance": 1.734063,
+    "azimuth": 81.000000,
+    "elevation": -33.000000,
+}
 
 @dataclass
 class MovingObstacle:
@@ -245,6 +251,21 @@ def clone_obstacles(obstacles: list[MovingObstacle]) -> list[MovingObstacle]:
 # Visualization helpers (must be called every frame before sim.render())
 # ---------------------------------------------------------------------------
 
+def print_free_cam(sim):
+    if sim.viewer is None:
+        return
+    human_viewer = sim.viewer._viewers.get("human")
+    if human_viewer is None:
+        return
+
+    cam = human_viewer.cam
+    print("FREE_CAM = {")
+    print(f'    "lookat": np.array([{cam.lookat[0]:.6f}, {cam.lookat[1]:.6f}, {cam.lookat[2]:.6f}]),')
+    print(f'    "distance": {float(cam.distance):.6f},')
+    print(f'    "azimuth": {float(cam.azimuth):.6f},')
+    print(f'    "elevation": {float(cam.elevation):.6f},')
+    print("}")
+
 def draw_scene(sim: Sim, path: np.ndarray, obstacles: list[MovingObstacle]):
     # Planned path - blue preview from the current state.
     if len(path) >= 2:
@@ -327,6 +348,7 @@ def main():
                     frame = sim.render(
                         mode="rgb_array",
                         camera=CAPTURE_CAMERA,
+                        cam_config=FREE_CAM,
                         width=CAPTURE_WIDTH,
                         height=CAPTURE_HEIGHT,
                     )
@@ -335,6 +357,7 @@ def main():
                 if SHOW_WINDOW:
                     sim.render(
                         camera=CAPTURE_CAMERA,
+                        cam_config=FREE_CAM,
                         width=CAPTURE_WIDTH,
                         height=CAPTURE_HEIGHT,
                     )
@@ -351,6 +374,7 @@ def main():
             output_path = CAPTURE_DIR / f"apf_capture_Cam{CAPTURE_CAMERA}_{timestamp}.mp4"
             iio.imwrite(output_path, video_frames, fps=CAPTURE_FPS)
             print(f"Saved capture to {output_path}")
+        print_free_cam(sim)
         sim.close()
 
 
