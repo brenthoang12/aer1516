@@ -1,0 +1,49 @@
+<mujoco model="Cave APF scene">
+    <option integrator="RK4" density="1.225" viscosity="1.8e-5" timestep="0.001"/>
+    <compiler inertiafromgeom="false" meshdir="assets" autolimits="true"/>
+    <statistic center="3 3.5 1.5" extent="4.5"/>
+
+    <visual>
+        <headlight diffuse="0.6 0.6 0.6" ambient="0.5 0.5 0.5" specular="0 0 0"/>
+        <rgba haze="0.15 0.25 0.35 0" fog="1 1 1 0"/>
+        <map fogstart="0" fogend="0"/>
+        <global azimuth="-30" elevation="-25" ellipsoidinertia="true"/>
+    </visual>
+
+    <asset>
+        <texture type="skybox" builtin="gradient" rgb1="0.3 0.5 0.7" rgb2="0 0 0" width="512" height="3072"/>
+        <texture type="2d" name="groundplane" builtin="checker" mark="edge"
+                 rgb1="0.2 0.3 0.4" rgb2="0.1 0.2 0.3" markrgb="0.8 0.8 0.8" width="512" height="512"/>
+        <material name="groundplane" texture="groundplane" texuniform="true" texrepeat="5 7" reflectance="0.2"/>
+        <!-- Semi-transparent glass walls for the bounding box -->
+        <material name="boundary" rgba="0.5 0.7 0.9 0.12"/>
+        <!-- Solid obstacle material -->
+        <material name="obstacle" rgba="0.85 0.25 0.15 1.0"/>
+    </asset>
+
+    <worldbody>
+        <light pos="3 3.5 3" dir="0 0 -1" directional="true"/>
+
+        <!-- Floor -->
+        <geom name="floor" size="0 0 0.05" type="plane" material="groundplane"/>
+
+        <!-- ── Bounding box walls (6 m × 7 m × 3 m) ──────────────────────────
+             contype/conaffinity=0 → visual only, drone passes through in state control -->
+        <geom name="ceiling"  type="box" pos="3.0 3.5 3.0"  size="3.0 3.5 0.02" material="boundary" contype="0" conaffinity="0"/>
+        <geom name="wall_xn"  type="box" pos="0.0 3.5 1.5"  size="0.02 3.5 1.5" material="boundary" contype="0" conaffinity="0"/>
+        <geom name="wall_xp"  type="box" pos="6.0 3.5 1.5"  size="0.02 3.5 1.5" material="boundary" contype="0" conaffinity="0"/>
+        <geom name="wall_yn"  type="box" pos="3.0 0.0 1.5"  size="3.0 0.02 1.5" material="boundary" contype="0" conaffinity="0"/>
+        <geom name="wall_yp"  type="box" pos="3.0 7.0 1.5"  size="3.0 0.02 1.5" material="boundary" contype="0" conaffinity="0"/>
+
+        <!-- ── U-shape obstacles (1.0 m tall) ────────────────────────────────
+             U opens toward -y (toward start).  Goal is behind the back wall.
+
+             Back wall:   spans x=[1.5, 4.5],  y=[4.35, 4.65],  z=[0, 1.0]
+             Left arm:    spans x=[1.35, 1.65], y=[2.70, 4.50],  z=[0, 1.0]
+             Right arm:   spans x=[4.35, 4.65], y=[2.70, 4.50],  z=[0, 1.0]
+        -->
+        <geom name="u_back"  type="box" pos="3.0 4.5 0.5"  size="1.5  0.15 0.5" material="obstacle"/>
+        <geom name="u_left"  type="box" pos="1.5 3.6 0.5"  size="0.15 0.9  0.5" material="obstacle"/>
+        <geom name="u_right" type="box" pos="4.5 3.6 0.5"  size="0.15 0.9  0.5" material="obstacle"/>
+    </worldbody>
+</mujoco>
