@@ -9,6 +9,7 @@ version = "0.1.0"
 
 [dependencies]
 python = "3.13.*"
+matplotlib = ">=3.10.8,<4"
 
 [pypi-dependencies]
 crazyflow = { path = "/home/marcbishara/codefiles/wndsCodeFiles/aer1516/project_RACE/crazyflow", editable = true }
