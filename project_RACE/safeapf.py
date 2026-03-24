@@ -9,6 +9,8 @@ from crazyflow.sim.sim import use_box_collision
 
 
 GOAL = np.array([3.0, 3.0])
+WORLD_MIN = np.array([0.0, 0.0, 0.0])
+WORLD_MAX = np.array([6.0, 7.0, 3.0])
 SPHERE_OBSTACLES = [
     # {
     #     "name": "sphere1",
@@ -153,13 +155,44 @@ def wall_polygon(wall):
 
 
 def build_scene_xml():
+    center = 0.5 * (WORLD_MIN + WORLD_MAX)
     parts = [
         '<mujoco model="SAPF Scene">',
         '    <option timestep="0.001"/>',
+        '    <asset>',
+        '        <material name="boundary" rgba="0.5 0.7 0.9 0.12"/>',
+        '    </asset>',
         '    <worldbody>',
         '',
         '        <!-- Floor -->',
         '        <geom type="plane" size="0 0 0.05" rgba="0.8 0.8 0.8 1"/>',
+        '',
+        '        <!-- Visual boundary walls -->',
+        (
+            f'        <geom name="ceiling" type="box" pos="{center[0]:g} {center[1]:g} {WORLD_MAX[2]:g}" '
+            f'size="{0.5 * (WORLD_MAX[0] - WORLD_MIN[0]):g} {0.5 * (WORLD_MAX[1] - WORLD_MIN[1]):g} 0.02" '
+            'material="boundary" contype="0" conaffinity="0"/>'
+        ),
+        (
+            f'        <geom name="wall_xn" type="box" pos="{WORLD_MIN[0]:g} {center[1]:g} {center[2]:g}" '
+            f'size="0.02 {0.5 * (WORLD_MAX[1] - WORLD_MIN[1]):g} {center[2]:g}" '
+            'material="boundary" contype="0" conaffinity="0"/>'
+        ),
+        (
+            f'        <geom name="wall_xp" type="box" pos="{WORLD_MAX[0]:g} {center[1]:g} {center[2]:g}" '
+            f'size="0.02 {0.5 * (WORLD_MAX[1] - WORLD_MIN[1]):g} {center[2]:g}" '
+            'material="boundary" contype="0" conaffinity="0"/>'
+        ),
+        (
+            f'        <geom name="wall_yn" type="box" pos="{center[0]:g} {WORLD_MIN[1]:g} {center[2]:g}" '
+            f'size="{0.5 * (WORLD_MAX[0] - WORLD_MIN[0]):g} 0.02 {center[2]:g}" '
+            'material="boundary" contype="0" conaffinity="0"/>'
+        ),
+        (
+            f'        <geom name="wall_yp" type="box" pos="{center[0]:g} {WORLD_MAX[1]:g} {center[2]:g}" '
+            f'size="{0.5 * (WORLD_MAX[0] - WORLD_MIN[0]):g} 0.02 {center[2]:g}" '
+            'material="boundary" contype="0" conaffinity="0"/>'
+        ),
         '',
         '        <!-- Sphere obstacles with collision -->',
     ]
@@ -348,6 +381,15 @@ def main():
     plt.axis("equal")
     plt.xlabel("x [m]")
     plt.ylabel("y [m]")
+
+    world = np.array([
+        [WORLD_MIN[0], WORLD_MIN[1]],
+        [WORLD_MAX[0], WORLD_MIN[1]],
+        [WORLD_MAX[0], WORLD_MAX[1]],
+        [WORLD_MIN[0], WORLD_MAX[1]],
+        [WORLD_MIN[0], WORLD_MIN[1]],
+    ])
+    plt.plot(world[:, 0], world[:, 1], color="0.4", linewidth=1.5, alpha=0.8, label="Boundary")
 
     for sphere in SPHERE_OBSTACLES:
         circle = plt.Circle(sphere["center"], sphere["radius"], color="r", alpha=0.35)
