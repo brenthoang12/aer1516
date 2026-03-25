@@ -24,10 +24,10 @@ STEP_GAIN = 0.15
 GOAL_TOL = 0.05
 
 FREE_CAM = {
-    "lookat": np.array([3.457620, 3.575837, 0.332033]),
-    "distance": 8.624771,
-    "azimuth": 103.113208,
-    "elevation": -32.117117,
+    "lookat": np.array([2.540425, 3.509272, 0.366132]),
+    "distance": 7.599483,
+    "azimuth": 95.094340,
+    "elevation": -24.189189,
 }
 
 CAPTURE_DIR = Path(__file__).resolve().parent / "captures"
@@ -513,7 +513,7 @@ def draw_scene(sim, preview_path, start_pos):
     draw_points(sim, np.array([[start_pos[0], start_pos[1], Z_REF]]), rgba=np.array([1.0, 1.0, 1.0, 0.8]), size=0.05)
 
 
-def plot_results(traj, obstacle_traces, moving_spheres):
+def plot_results(traj, obstacle_traces, moving_spheres, plot_path=None):
     import matplotlib.pyplot as plt
 
     traj = np.array(traj)
@@ -553,6 +553,9 @@ def plot_results(traj, obstacle_traces, moving_spheres):
     plt.scatter(GOAL[0], GOAL[1], c="g", marker="x", s=80, label="Goal")
     plt.legend()
     plt.title("Safe-APF with moving spheres and live preview")
+    if plot_path is not None:
+        plt.savefig(plot_path, dpi=200, bbox_inches="tight")
+        print(f"Saved plot to {plot_path}")
     plt.show()
 
 
@@ -588,6 +591,7 @@ def main():
     cmd = np.zeros((sim.n_worlds, sim.n_drones, 13))
     start_pos = np.array(sim.data.states.pos[0, 0, :2])
     video_frames = []
+    output_stem = None
     show_window = not args.no_vis
 
     print(f"Running Safe-APF with map {map_xml.name}...")
@@ -649,7 +653,8 @@ def main():
         if args.save_video and video_frames:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             CAPTURE_DIR.mkdir(parents=True, exist_ok=True)
-            output_path = CAPTURE_DIR / f"safeapf_capture_Cam{CAPTURE_CAMERA}_{timestamp}.mp4"
+            output_stem = CAPTURE_DIR / f"safeapf_capture_Cam{CAPTURE_CAMERA}_{timestamp}"
+            output_path = output_stem.with_suffix(".mp4")
             iio.imwrite(output_path, video_frames, fps=CAPTURE_FPS)
             print(f"Saved capture to {output_path}")
         print_free_cam(sim)
@@ -658,7 +663,8 @@ def main():
             temp_xml.unlink(missing_ok=True)
 
     if not args.no_vis:
-        plot_results(traj, obstacle_traces, moving_spheres)
+        plot_path = output_stem.with_suffix(".png") if output_stem is not None else None
+        plot_results(traj, obstacle_traces, moving_spheres, plot_path=plot_path)
 
 
 if __name__ == "__main__":
