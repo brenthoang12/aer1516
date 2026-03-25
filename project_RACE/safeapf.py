@@ -37,7 +37,7 @@ CAPTURE_HEIGHT = 720
 CAPTURE_CAMERA = -1
 
 DEFAULT_TIMEOUT = 50.0
-DEFAULT_MOVING_SPHERES = 1
+DEFAULT_MOVING_SPHERES = 0
 DEFAULT_MOTION = "circle"
 DEFAULT_SPHERE_RADIUS = 0.25
 DEFAULT_SPHERE_RGBA = (1.0, 0.0, 0.0, 1.0)
@@ -575,7 +575,7 @@ def main():
     moving_spheres = build_moving_sphere_specs(args.moving_spheres, args.motion)
     runtime_xml, temp_xml = create_runtime_map(map_xml, moving_spheres)
 
-    sim = Sim(control=Control.state, xml_path=runtime_xml)
+    sim = Sim(control=Control.state, xml_path=runtime_xml, device="gpu")
     use_box_collision(sim, enable=True)
     sim.reset()
 
