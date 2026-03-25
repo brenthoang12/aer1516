@@ -1,10 +1,10 @@
+import argparse
 from dataclasses import dataclass, field
 from datetime import datetime
-import tempfile
 from pathlib import Path
+import xml.etree.ElementTree as ET
 
 import imageio.v3 as iio
-import matplotlib.pyplot as plt
 import numpy as np
 
 from crazyflow.control import Control
@@ -13,12 +13,8 @@ from crazyflow.sim.sim import use_box_collision
 from crazyflow.sim.visualize import draw_line, draw_points
 
 
-GOAL = np.array([3.0, 3.0])
-WORLD_MIN = np.array([0.0, 0.0, 0.0])
-WORLD_MAX = np.array([6.0, 7.0, 3.0])
 PREVIEW_STEPS = 12
 CTRL_FREQ = 100
-SIM_STEPS = 5000
 Z_REF = 0.5
 YAW_REF = 0.0
 STEP_GAIN = 0.15
@@ -36,50 +32,18 @@ CAPTURE_FPS = 24
 CAPTURE_WIDTH = 1280
 CAPTURE_HEIGHT = 720
 CAPTURE_CAMERA = -1
-SAVE_VIDEO = True
-SHOW_WINDOW = True
 
-SPHERE_SPECS = [
-    {
-        "name": "sphere2",
-        "center": np.array([3.0, 2.0]),
-        "radius": 0.25,
-        "z": 0.25,
-        "rgba": (1.0, 0.0, 0.0, 1.0),
-        "motion": "circle",
-        "anchor": np.array([3.0, 2.0]),
-        "orbit_radius": 0.45,
-        "angular_speed": 0.8,
-        "phase": 0.0,
-    },
-]
+DEFAULT_TIMEOUT = 50.0
+DEFAULT_MOVING_SPHERES = 1
+DEFAULT_MOTION = "circle"
+DEFAULT_SPHERE_RADIUS = 0.25
+DEFAULT_SPHERE_RGBA = (1.0, 0.0, 0.0, 1.0)
 
-CAVE_WALLS = [
-    {
-        "name": "uwall_bottom",
-        "center": np.array([1.81819805, 1.81819805]),
-        "half_extents": np.array([0.5, 0.05]),
-        "angle_deg": -45.0,
-        "z": 0.0,
-        "rgba": (0.8, 0.2, 0.2, 1.0),
-    },
-    {
-        "name": "uwall_left",
-        "center": np.array([1.18180195, 1.81819805]),
-        "half_extents": np.array([0.05, 0.5]),
-        "angle_deg": -45.0,
-        "z": 0.0,
-        "rgba": (0.8, 0.2, 0.2, 1.0),
-    },
-    {
-        "name": "uwall_right",
-        "center": np.array([1.81819805, 1.18180195]),
-        "half_extents": np.array([0.05, 0.5]),
-        "angle_deg": -45.0,
-        "z": 0.0,
-        "rgba": (0.8, 0.2, 0.2, 1.0),
-    },
-]
+GOAL = np.array([3.0, 3.0])
+WORLD_MIN = np.array([0.0, 0.0, 0.0])
+WORLD_MAX = np.array([6.0, 7.0, 3.0])
+STATIC_BOX_OBSTACLES = []
+STATIC_SPHERE_OBSTACLES = []
 
 
 @dataclass
@@ -146,28 +110,148 @@ class MovingSphere:
             raise ValueError(f"Unsupported obstacle motion: {self.motion}")
 
 
-def clone_sphere_obstacles(specs):
-    obstacles = []
-    for spec in specs:
-        obstacles.append(
+def parse_args():
+    parser = argparse.ArgumentParser(description="Run Safe-APF with a static XML map and optional moving spheres.")
+    parser.add_argument("map_xml", type=Path, help="XML file containing the static environment and static obstacles.")
+    parser.add_argument(
+        "--moving-spheres",
+        type=int,
+        default=DEFAULT_MOVING_SPHERES,
+        help="Number of moving sphere obstacles to add at runtime.",
+    )
+    parser.add_argument(
+        "--motion",
+        choices=["static", "circle", "random"],
+        default=DEFAULT_MOTION,
+        help="Motion model used for all moving spheres.",
+    )
+    parser.add_argument("--save-video", action="store_true", help="Save an MP4 capture of the simulation.")
+    parser.add_argument("--no-vis", action="store_true", help="Disable live rendering and the final matplotlib plot.")
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        default=DEFAULT_TIMEOUT,
+        help="Simulation timeout in seconds.",
+    )
+    return parser.parse_args()
+
+
+def parse_vec(text, expected_len):
+    values = np.fromstring(text or "", sep=" ")
+    if values.size != expected_len:
+        raise ValueError(f"Expected {expected_len} values, got {values.size} from {text!r}")
+    return values
+
+
+def rgba_or_default(text, default):
+    if not text:
+        return default
+    rgba = parse_vec(text, 4)
+    return tuple(float(v) for v in rgba)
+
+
+def parse_map(map_xml: Path):
+    root = ET.parse(map_xml).getroot()
+    worldbody = root.find("worldbody")
+    if worldbody is None:
+        raise ValueError(f"{map_xml} is missing <worldbody>.")
+
+    wall_xn = worldbody.find("./geom[@name='wall_xn']")
+    wall_xp = worldbody.find("./geom[@name='wall_xp']")
+    wall_yn = worldbody.find("./geom[@name='wall_yn']")
+    wall_yp = worldbody.find("./geom[@name='wall_yp']")
+    ceiling = worldbody.find("./geom[@name='ceiling']")
+    goal_body = worldbody.find("./body[@name='goal']")
+
+    if None in (wall_xn, wall_xp, wall_yn, wall_yp, ceiling, goal_body):
+        raise ValueError(
+            "Map XML must define wall_xn, wall_xp, wall_yn, wall_yp, ceiling, and a goal body."
+        )
+
+    world_min = np.array([
+        parse_vec(wall_xn.attrib["pos"], 3)[0],
+        parse_vec(wall_yn.attrib["pos"], 3)[1],
+        0.0,
+    ])
+    world_max = np.array([
+        parse_vec(wall_xp.attrib["pos"], 3)[0],
+        parse_vec(wall_yp.attrib["pos"], 3)[1],
+        parse_vec(ceiling.attrib["pos"], 3)[2],
+    ])
+    goal = parse_vec(goal_body.attrib["pos"], 3)[:2]
+
+    static_boxes = []
+    static_spheres = []
+    for body in worldbody.findall("body"):
+        name = body.attrib.get("name", "")
+        if name == "goal":
+            continue
+
+        geom = body.find("geom")
+        if geom is None:
+            continue
+
+        pos = parse_vec(body.attrib.get("pos", "0 0 0"), 3)
+        euler = parse_vec(body.attrib.get("euler", "0 0 0"), 3)
+        geom_type = geom.attrib.get("type")
+        rgba = rgba_or_default(geom.attrib.get("rgba"), DEFAULT_SPHERE_RGBA)
+
+        if geom_type == "box":
+            size = parse_vec(geom.attrib["size"], 3)
+            static_boxes.append(
+                {
+                    "name": name,
+                    "center": pos[:2],
+                    "half_extents": size[:2],
+                    "angle_deg": float(euler[2]),
+                    "z": float(pos[2]),
+                    "rgba": rgba,
+                }
+            )
+        elif geom_type == "sphere":
+            static_spheres.append(
+                {
+                    "name": name,
+                    "center": pos[:2],
+                    "radius": float(parse_vec(geom.attrib["size"], 1)[0]),
+                    "z": float(pos[2]),
+                    "rgba": rgba,
+                }
+            )
+
+    return world_min, world_max, goal, static_boxes, static_spheres
+
+
+def build_moving_sphere_specs(count: int, motion: str):
+    if count <= 0:
+        return []
+
+    x_candidates = np.linspace(WORLD_MIN[0] + 1.0, WORLD_MAX[0] - 1.0, count)
+    y_base = WORLD_MIN[1] + 0.35 * (WORLD_MAX[1] - WORLD_MIN[1])
+    specs = []
+    for idx, x in enumerate(x_candidates):
+        center = np.array([x, y_base + 0.25 * np.sin(idx)])
+        phase = idx * np.pi / max(count, 1)
+        velocity = np.array([0.18 * np.cos(phase), 0.18 * np.sin(phase)])
+        specs.append(
             MovingSphere(
-                name=spec["name"],
-                center=np.array(spec["center"], dtype=float),
-                radius=float(spec["radius"]),
-                z=float(spec["z"]),
-                rgba=tuple(spec["rgba"]),
-                motion=spec.get("motion", "static"),
-                anchor=np.array(spec.get("anchor", spec["center"]), dtype=float),
-                orbit_radius=float(spec.get("orbit_radius", 0.0)),
-                angular_speed=float(spec.get("angular_speed", 0.0)),
-                phase=float(spec.get("phase", 0.0)),
-                velocity=np.array(spec.get("velocity", np.zeros(2)), dtype=float),
-                max_speed=float(spec.get("max_speed", 0.3)),
-                turn_interval=float(spec.get("turn_interval", 1.5)),
-                seed=spec.get("seed"),
+                name=f"moving_sphere_{idx}",
+                center=center,
+                radius=DEFAULT_SPHERE_RADIUS,
+                z=DEFAULT_SPHERE_RADIUS,
+                rgba=DEFAULT_SPHERE_RGBA,
+                motion=motion,
+                anchor=center.copy(),
+                orbit_radius=0.45,
+                angular_speed=0.8 + 0.1 * idx,
+                phase=phase,
+                velocity=velocity,
+                max_speed=0.22,
+                turn_interval=1.5,
+                seed=idx,
             )
         )
-    return obstacles
+    return specs
 
 
 def update_obstacles(obstacles, t, dt):
@@ -206,22 +290,22 @@ def rotmat(angle_rad):
     return np.array([[c, -s], [s, c]])
 
 
-def rgba_str(rgba):
-    return " ".join(f"{v:g}" for v in rgba)
-
-
 def sphere_nearest_point(p, sphere):
-    diff = p - sphere.center
+    center = sphere.center if isinstance(sphere, MovingSphere) else sphere["center"]
+    radius = sphere.radius if isinstance(sphere, MovingSphere) else sphere["radius"]
+    diff = p - center
     dist = np.linalg.norm(diff)
     if dist < 1e-9:
-        return sphere.center + np.array([sphere.radius, 0.0])
-    return sphere.center + sphere.radius * diff / dist
+        return center + np.array([radius, 0.0])
+    return center + radius * diff / dist
 
 
 def sphere_repulsion_2d(p, sphere, eta, Qstar):
-    diff = p - sphere.center
+    center = sphere.center if isinstance(sphere, MovingSphere) else sphere["center"]
+    radius = sphere.radius if isinstance(sphere, MovingSphere) else sphere["radius"]
+    diff = p - center
     center_dist = np.linalg.norm(diff)
-    surface_dist = center_dist - sphere.radius
+    surface_dist = center_dist - radius
 
     if surface_dist < 1e-6:
         if center_dist < 1e-9:
@@ -287,81 +371,7 @@ def wall_polygon(wall):
     return np.array([wall_world_point(corner, wall) for corner in local_corners])
 
 
-def build_scene_xml():
-    center = 0.5 * (WORLD_MIN + WORLD_MAX)
-    parts = [
-        '<mujoco model="SAPF Scene">',
-        '    <option timestep="0.001"/>',
-        '    <asset>',
-        '        <material name="boundary" rgba="0.5 0.7 0.9 0.12"/>',
-        '    </asset>',
-        '    <worldbody>',
-        '',
-        '        <!-- Floor -->',
-        '        <geom type="plane" size="0 0 0.05" rgba="0.8 0.8 0.8 1"/>',
-        '',
-        '        <!-- Visual boundary walls -->',
-        (
-            f'        <geom name="ceiling" type="box" pos="{center[0]:g} {center[1]:g} {WORLD_MAX[2]:g}" '
-            f'size="{0.5 * (WORLD_MAX[0] - WORLD_MIN[0]):g} {0.5 * (WORLD_MAX[1] - WORLD_MIN[1]):g} 0.02" '
-            'material="boundary" contype="0" conaffinity="0"/>'
-        ),
-        (
-            f'        <geom name="wall_xn" type="box" pos="{WORLD_MIN[0]:g} {center[1]:g} {center[2]:g}" '
-            f'size="0.02 {0.5 * (WORLD_MAX[1] - WORLD_MIN[1]):g} {center[2]:g}" '
-            'material="boundary" contype="0" conaffinity="0"/>'
-        ),
-        (
-            f'        <geom name="wall_xp" type="box" pos="{WORLD_MAX[0]:g} {center[1]:g} {center[2]:g}" '
-            f'size="0.02 {0.5 * (WORLD_MAX[1] - WORLD_MIN[1]):g} {center[2]:g}" '
-            'material="boundary" contype="0" conaffinity="0"/>'
-        ),
-        (
-            f'        <geom name="wall_yn" type="box" pos="{center[0]:g} {WORLD_MIN[1]:g} {center[2]:g}" '
-            f'size="{0.5 * (WORLD_MAX[0] - WORLD_MIN[0]):g} 0.02 {center[2]:g}" '
-            'material="boundary" contype="0" conaffinity="0"/>'
-        ),
-        (
-            f'        <geom name="wall_yp" type="box" pos="{center[0]:g} {WORLD_MAX[1]:g} {center[2]:g}" '
-            f'size="{0.5 * (WORLD_MAX[0] - WORLD_MIN[0]):g} 0.02 {center[2]:g}" '
-            'material="boundary" contype="0" conaffinity="0"/>'
-        ),
-        '',
-        '        <!-- U-shape walls with collision -->',
-    ]
-
-    for wall in CAVE_WALLS:
-        cx, cy = wall["center"]
-        hx, hy = wall["half_extents"]
-        parts += [
-            (
-                f'        <body name="{wall["name"]}" '
-                f'pos="{cx:g} {cy:g} {wall["z"]:g}" euler="0 0 {wall["angle_deg"]:g}">'
-            ),
-            f'            <geom type="box" size="{hx:g} {hy:g} 0.5"',
-            f'                  rgba="{rgba_str(wall["rgba"])}"',
-            '                  contype="1" conaffinity="1"',
-            '                  density="1000"/>',
-            '        </body>',
-            '',
-        ]
-
-    gx, gy = GOAL
-    parts += [
-        '        <!-- Goal marker (visual only) -->',
-        f'        <body name="goal" pos="{gx:g} {gy:g} 0.5">',
-        '            <geom type="sphere" size="0.1"',
-        '                  rgba="0 1 0 1"',
-        '                  contype="0" conaffinity="0"/>',
-        '        </body>',
-        '',
-        '    </worldbody>',
-        '</mujoco>',
-    ]
-    return "\n".join(parts)
-
-
-def apf_gradient(p, theta, sphere_obstacles, params):
+def apf_gradient(p, theta, moving_spheres, params):
     zeta = params["zeta"]
     eta = params["eta"]
     dstar = params["dstar"]
@@ -379,7 +389,7 @@ def apf_gradient(p, theta, sphere_obstacles, params):
 
     grad_rep_total = np.zeros(2)
 
-    for sphere in sphere_obstacles:
+    for sphere in [*STATIC_SPHERE_OBSTACLES, *moving_spheres]:
         nearest = sphere_nearest_point(p, sphere)
         dist = max(np.linalg.norm(p - nearest), 1e-6)
         if dist > Qstar:
@@ -401,7 +411,7 @@ def apf_gradient(p, theta, sphere_obstacles, params):
         gamma = np.pi * direction_sign * drel
         grad_rep_total += rotmat(gamma) @ grad_rep
 
-    for wall in CAVE_WALLS:
+    for wall in STATIC_BOX_OBSTACLES:
         nearest = wall_nearest_point(p, wall)
         dist = max(np.linalg.norm(p - nearest), 1e-6)
         if dist > Qstar:
@@ -429,14 +439,14 @@ def apf_gradient(p, theta, sphere_obstacles, params):
     return grad_att + grad_rep_total
 
 
-def rollout_preview(start, theta, sphere_obstacles, params, steps=PREVIEW_STEPS, step_gain=STEP_GAIN):
+def rollout_preview(start, theta, moving_spheres, params, steps=PREVIEW_STEPS, step_gain=STEP_GAIN):
     path = [start.copy()]
     p = start.copy()
     heading = theta
     for _ in range(steps):
         if np.linalg.norm(p - GOAL) < GOAL_TOL:
             break
-        g = apf_gradient(p, heading, sphere_obstacles, params)
+        g = apf_gradient(p, heading, moving_spheres, params)
         direction = -g
         norm_dir = np.linalg.norm(direction)
         if norm_dir < 1e-6:
@@ -450,7 +460,7 @@ def rollout_preview(start, theta, sphere_obstacles, params, steps=PREVIEW_STEPS,
     return np.array(path)
 
 
-def draw_scene(sim, preview_path, sphere_obstacles, start_pos):
+def draw_scene(sim, preview_path, moving_spheres, start_pos):
     if len(preview_path) >= 2:
         draw_line(
             sim,
@@ -463,7 +473,7 @@ def draw_scene(sim, preview_path, sphere_obstacles, start_pos):
     draw_points(sim, np.array([[GOAL[0], GOAL[1], Z_REF]]), rgba=np.array([0.0, 1.0, 0.2, 1.0]), size=0.08)
     draw_points(sim, np.array([[start_pos[0], start_pos[1], Z_REF]]), rgba=np.array([1.0, 1.0, 1.0, 0.8]), size=0.05)
 
-    for obstacle in sphere_obstacles:
+    for obstacle in moving_spheres:
         draw_points(
             sim,
             np.array([[obstacle.center[0], obstacle.center[1], obstacle.z]]),
@@ -472,15 +482,65 @@ def draw_scene(sim, preview_path, sphere_obstacles, start_pos):
         )
 
 
+def plot_results(traj, obstacle_traces, moving_spheres):
+    import matplotlib.pyplot as plt
+
+    traj = np.array(traj)
+    plt.figure(figsize=(6, 6))
+    plt.grid(True)
+    plt.axis("equal")
+    plt.xlabel("x [m]")
+    plt.ylabel("y [m]")
+
+    world = np.array([
+        [WORLD_MIN[0], WORLD_MIN[1]],
+        [WORLD_MAX[0], WORLD_MIN[1]],
+        [WORLD_MAX[0], WORLD_MAX[1]],
+        [WORLD_MIN[0], WORLD_MAX[1]],
+        [WORLD_MIN[0], WORLD_MIN[1]],
+    ])
+    plt.plot(world[:, 0], world[:, 1], color="0.4", linewidth=1.5, alpha=0.8, label="Boundary")
+
+    for sphere in STATIC_SPHERE_OBSTACLES:
+        circle = plt.Circle(sphere["center"], sphere["radius"], color="r", alpha=0.35)
+        plt.gca().add_patch(circle)
+
+    for trace, obstacle in zip(obstacle_traces, moving_spheres):
+        trace = np.array(trace)
+        if len(trace) > 1:
+            plt.plot(trace[:, 0], trace[:, 1], "r--", alpha=0.35)
+        circle = plt.Circle(obstacle.center, obstacle.radius, color="r", alpha=0.35)
+        plt.gca().add_patch(circle)
+
+    for wall in STATIC_BOX_OBSTACLES:
+        polygon = wall_polygon(wall)
+        plt.plot(polygon[:, 0], polygon[:, 1], "r-", alpha=0.7)
+
+    if len(traj) > 0:
+        plt.plot(traj[:, 0], traj[:, 1], "b-", label="Trajectory")
+        plt.scatter(traj[0, 0], traj[0, 1], c="w", edgecolors="k", s=50, label="Start")
+    plt.scatter(GOAL[0], GOAL[1], c="g", marker="x", s=80, label="Goal")
+    plt.legend()
+    plt.title("Safe-APF with moving spheres and live preview")
+    plt.show()
+
+
 def main():
-    sphere_obstacles = clone_sphere_obstacles(SPHERE_SPECS)
+    global GOAL, WORLD_MIN, WORLD_MAX, STATIC_BOX_OBSTACLES, STATIC_SPHERE_OBSTACLES
 
-    with tempfile.NamedTemporaryFile(suffix=".xml", delete=False) as tmp:
-        tmp.write(build_scene_xml().encode())
-        tmp.flush()
-        xml_path = Path(tmp.name)
+    args = parse_args()
+    map_xml = args.map_xml.resolve()
+    if not map_xml.exists():
+        raise FileNotFoundError(f"Map XML not found: {map_xml}")
+    if args.moving_spheres < 0:
+        raise ValueError("--moving-spheres must be non-negative.")
+    if args.timeout <= 0.0:
+        raise ValueError("--timeout must be positive.")
 
-    sim = Sim(control=Control.state, xml_path=xml_path)
+    WORLD_MIN, WORLD_MAX, GOAL, STATIC_BOX_OBSTACLES, STATIC_SPHERE_OBSTACLES = parse_map(map_xml)
+    moving_spheres = build_moving_sphere_specs(args.moving_spheres, args.motion)
+
+    sim = Sim(control=Control.state, xml_path=map_xml)
     use_box_collision(sim, enable=True)
     sim.reset()
 
@@ -495,18 +555,20 @@ def main():
     )
 
     fps = CAPTURE_FPS
+    sim_steps = int(args.timeout * CTRL_FREQ)
     traj = []
-    obstacle_traces = [[] for _ in sphere_obstacles]
+    obstacle_traces = [[] for _ in moving_spheres]
     cmd = np.zeros((sim.n_worlds, sim.n_drones, 13))
     start_pos = np.array(sim.data.states.pos[0, 0, :2])
     video_frames = []
+    show_window = not args.no_vis
 
-    print("Running full APF + Safe-APF with moving sphere obstacles...")
+    print(f"Running Safe-APF with map {map_xml.name}...")
 
     try:
-        for step in range(SIM_STEPS):
+        for step in range(sim_steps):
             t = step / CTRL_FREQ
-            update_obstacles(sphere_obstacles, t, 1.0 / CTRL_FREQ)
+            update_obstacles(moving_spheres, t, 1.0 / CTRL_FREQ)
 
             states = sim.data.states
             pos = states.pos[0, 0]
@@ -514,14 +576,14 @@ def main():
             theta = quat_to_yaw(states.quat[0, 0])
 
             traj.append(p.copy())
-            for idx, obstacle in enumerate(sphere_obstacles):
+            for idx, obstacle in enumerate(moving_spheres):
                 obstacle_traces[idx].append(obstacle.center.copy())
 
             if np.linalg.norm(p - GOAL) < GOAL_TOL:
                 print("Reached goal.")
                 break
 
-            g = apf_gradient(p, theta, sphere_obstacles, params)
+            g = apf_gradient(p, theta, moving_spheres, params)
             direction = -g
             norm_dir = np.linalg.norm(direction)
             if norm_dir > 1e-6:
@@ -542,11 +604,11 @@ def main():
             sim.state_control(cmd)
             sim.step(sim.freq // sim.control_freq)
 
-            if (step * fps) % sim.control_freq < fps:
-                preview_path = rollout_preview(p, theta, sphere_obstacles, params)
-                draw_scene(sim, preview_path, sphere_obstacles, start_pos)
+            if (show_window or args.save_video) and (step * fps) % sim.control_freq < fps:
+                preview_path = rollout_preview(p, theta, moving_spheres, params)
+                draw_scene(sim, preview_path, moving_spheres, start_pos)
 
-                if SAVE_VIDEO:
+                if args.save_video:
                     frame = sim.render(
                         mode="rgb_array",
                         camera=CAPTURE_CAMERA,
@@ -557,7 +619,7 @@ def main():
                     if frame is not None:
                         video_frames.append(frame)
 
-                if SHOW_WINDOW:
+                if show_window:
                     sim.render(
                         camera=CAPTURE_CAMERA,
                         cam_config=FREE_CAM,
@@ -567,7 +629,7 @@ def main():
         else:
             print("Time limit reached.")
     finally:
-        if SAVE_VIDEO and video_frames:
+        if args.save_video and video_frames:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             CAPTURE_DIR.mkdir(parents=True, exist_ok=True)
             output_path = CAPTURE_DIR / f"safeapf_capture_Cam{CAPTURE_CAMERA}_{timestamp}.mp4"
@@ -576,40 +638,8 @@ def main():
         print_free_cam(sim)
         sim.close()
 
-    traj = np.array(traj)
-    plt.figure(figsize=(6, 6))
-    plt.grid(True)
-    plt.axis("equal")
-    plt.xlabel("x [m]")
-    plt.ylabel("y [m]")
-
-    world = np.array([
-        [WORLD_MIN[0], WORLD_MIN[1]],
-        [WORLD_MAX[0], WORLD_MIN[1]],
-        [WORLD_MAX[0], WORLD_MAX[1]],
-        [WORLD_MIN[0], WORLD_MAX[1]],
-        [WORLD_MIN[0], WORLD_MIN[1]],
-    ])
-    plt.plot(world[:, 0], world[:, 1], color="0.4", linewidth=1.5, alpha=0.8, label="Boundary")
-
-    for trace, obstacle in zip(obstacle_traces, sphere_obstacles):
-        trace = np.array(trace)
-        if len(trace) > 1:
-            plt.plot(trace[:, 0], trace[:, 1], "r--", alpha=0.35)
-        circle = plt.Circle(obstacle.center, obstacle.radius, color="r", alpha=0.35)
-        plt.gca().add_patch(circle)
-
-    for wall in CAVE_WALLS:
-        polygon = wall_polygon(wall)
-        plt.plot(polygon[:, 0], polygon[:, 1], "r-", alpha=0.7)
-
-    if len(traj) > 0:
-        plt.plot(traj[:, 0], traj[:, 1], "b-", label="Trajectory")
-        plt.scatter(traj[0, 0], traj[0, 1], c="w", edgecolors="k", s=50, label="Start")
-    plt.scatter(GOAL[0], GOAL[1], c="g", marker="x", s=80, label="Goal")
-    plt.legend()
-    plt.title("Safe-APF with moving spheres and live preview")
-    plt.show()
+    if not args.no_vis:
+        plot_results(traj, obstacle_traces, moving_spheres)
 
 
 if __name__ == "__main__":
