@@ -1,7 +1,9 @@
 from dataclasses import dataclass, field
+from datetime import datetime
 import tempfile
 from pathlib import Path
 
+import imageio.v3 as iio
 import matplotlib.pyplot as plt
 import numpy as np
 
@@ -21,6 +23,21 @@ Z_REF = 0.5
 YAW_REF = 0.0
 STEP_GAIN = 0.15
 GOAL_TOL = 0.05
+
+FREE_CAM = {
+    "lookat": np.array([3.0, 3.5, 1.2]),
+    "distance": 7.5,
+    "azimuth": 0.0,
+    "elevation": -35.0,
+}
+
+CAPTURE_DIR = Path(__file__).resolve().parent / "captures"
+CAPTURE_FPS = 24
+CAPTURE_WIDTH = 1280
+CAPTURE_HEIGHT = 720
+CAPTURE_CAMERA = -1
+SAVE_VIDEO = True
+SHOW_WINDOW = True
 
 SPHERE_SPECS = [
     {
@@ -156,6 +173,22 @@ def clone_sphere_obstacles(specs):
 def update_obstacles(obstacles, t, dt):
     for obstacle in obstacles:
         obstacle.update(t, dt)
+
+
+def print_free_cam(sim):
+    if sim.viewer is None:
+        return
+    human_viewer = sim.viewer._viewers.get("human")
+    if human_viewer is None:
+        return
+
+    cam = human_viewer.cam
+    print("FREE_CAM = {")
+    print(f'    "lookat": np.array([{cam.lookat[0]:.6f}, {cam.lookat[1]:.6f}, {cam.lookat[2]:.6f}]),')
+    print(f'    "distance": {float(cam.distance):.6f},')
+    print(f'    "azimuth": {float(cam.azimuth):.6f},')
+    print(f'    "elevation": {float(cam.elevation):.6f},')
+    print("}")
 
 
 def quat_to_yaw(q):
@@ -461,60 +494,87 @@ def main():
         alpha_th=np.deg2rad(5),
     )
 
-    fps = 60
+    fps = CAPTURE_FPS
     traj = []
     obstacle_traces = [[] for _ in sphere_obstacles]
     cmd = np.zeros((sim.n_worlds, sim.n_drones, 13))
     start_pos = np.array(sim.data.states.pos[0, 0, :2])
+    video_frames = []
 
     print("Running full APF + Safe-APF with moving sphere obstacles...")
 
-    for step in range(SIM_STEPS):
-        t = step / CTRL_FREQ
-        update_obstacles(sphere_obstacles, t, 1.0 / CTRL_FREQ)
+    try:
+        for step in range(SIM_STEPS):
+            t = step / CTRL_FREQ
+            update_obstacles(sphere_obstacles, t, 1.0 / CTRL_FREQ)
 
-        states = sim.data.states
-        pos = states.pos[0, 0]
-        p = np.array([pos[0], pos[1]])
-        theta = quat_to_yaw(states.quat[0, 0])
+            states = sim.data.states
+            pos = states.pos[0, 0]
+            p = np.array([pos[0], pos[1]])
+            theta = quat_to_yaw(states.quat[0, 0])
 
-        traj.append(p.copy())
-        for idx, obstacle in enumerate(sphere_obstacles):
-            obstacle_traces[idx].append(obstacle.center.copy())
+            traj.append(p.copy())
+            for idx, obstacle in enumerate(sphere_obstacles):
+                obstacle_traces[idx].append(obstacle.center.copy())
 
-        if np.linalg.norm(p - GOAL) < GOAL_TOL:
-            print("Reached goal.")
-            break
+            if np.linalg.norm(p - GOAL) < GOAL_TOL:
+                print("Reached goal.")
+                break
 
-        g = apf_gradient(p, theta, sphere_obstacles, params)
-        direction = -g
-        norm_dir = np.linalg.norm(direction)
-        if norm_dir > 1e-6:
-            direction /= norm_dir
+            g = apf_gradient(p, theta, sphere_obstacles, params)
+            direction = -g
+            norm_dir = np.linalg.norm(direction)
+            if norm_dir > 1e-6:
+                direction /= norm_dir
+            else:
+                direction = np.zeros(2)
+
+            p_des = p + STEP_GAIN * direction
+            p_des[0] = np.clip(p_des[0], WORLD_MIN[0] + 0.01, WORLD_MAX[0] - 0.01)
+            p_des[1] = np.clip(p_des[1], WORLD_MIN[1] + 0.01, WORLD_MAX[1] - 0.01)
+
+            cmd[..., 0] = p_des[0]
+            cmd[..., 1] = p_des[1]
+            cmd[..., 2] = Z_REF
+            cmd[..., 3] = YAW_REF
+            cmd[..., 6] = 0.0
+
+            sim.state_control(cmd)
+            sim.step(sim.freq // sim.control_freq)
+
+            if (step * fps) % sim.control_freq < fps:
+                preview_path = rollout_preview(p, theta, sphere_obstacles, params)
+                draw_scene(sim, preview_path, sphere_obstacles, start_pos)
+
+                if SAVE_VIDEO:
+                    frame = sim.render(
+                        mode="rgb_array",
+                        camera=CAPTURE_CAMERA,
+                        cam_config=FREE_CAM,
+                        width=CAPTURE_WIDTH,
+                        height=CAPTURE_HEIGHT,
+                    )
+                    if frame is not None:
+                        video_frames.append(frame)
+
+                if SHOW_WINDOW:
+                    sim.render(
+                        camera=CAPTURE_CAMERA,
+                        cam_config=FREE_CAM,
+                        width=CAPTURE_WIDTH,
+                        height=CAPTURE_HEIGHT,
+                    )
         else:
-            direction = np.zeros(2)
-
-        p_des = p + STEP_GAIN * direction
-        p_des[0] = np.clip(p_des[0], WORLD_MIN[0] + 0.01, WORLD_MAX[0] - 0.01)
-        p_des[1] = np.clip(p_des[1], WORLD_MIN[1] + 0.01, WORLD_MAX[1] - 0.01)
-
-        cmd[..., 0] = p_des[0]
-        cmd[..., 1] = p_des[1]
-        cmd[..., 2] = Z_REF
-        cmd[..., 3] = YAW_REF
-        cmd[..., 6] = 0.0
-
-        sim.state_control(cmd)
-        sim.step(sim.freq // sim.control_freq)
-
-        if (step * fps) % sim.control_freq < fps:
-            preview_path = rollout_preview(p, theta, sphere_obstacles, params)
-            draw_scene(sim, preview_path, sphere_obstacles, start_pos)
-            sim.render()
-    else:
-        print("Time limit reached.")
-
-    sim.close()
+            print("Time limit reached.")
+    finally:
+        if SAVE_VIDEO and video_frames:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            CAPTURE_DIR.mkdir(parents=True, exist_ok=True)
+            output_path = CAPTURE_DIR / f"safeapf_capture_Cam{CAPTURE_CAMERA}_{timestamp}.mp4"
+            iio.imwrite(output_path, video_frames, fps=CAPTURE_FPS)
+            print(f"Saved capture to {output_path}")
+        print_free_cam(sim)
+        sim.close()
 
     traj = np.array(traj)
     plt.figure(figsize=(6, 6))
