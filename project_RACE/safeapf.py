@@ -2,9 +2,12 @@ import argparse
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+import tempfile
 import xml.etree.ElementTree as ET
 
 import imageio.v3 as iio
+import jax.numpy as jnp
+import mujoco
 import numpy as np
 
 from crazyflow.control import Control
@@ -21,10 +24,10 @@ STEP_GAIN = 0.15
 GOAL_TOL = 0.05
 
 FREE_CAM = {
-    "lookat": np.array([3.0, 3.5, 1.2]),
-    "distance": 7.5,
-    "azimuth": 0.0,
-    "elevation": -35.0,
+    "lookat": np.array([3.457620, 3.575837, 0.332033]),
+    "distance": 8.624771,
+    "azimuth": 103.113208,
+    "elevation": -32.117117,
 }
 
 CAPTURE_DIR = Path(__file__).resolve().parent / "captures"
@@ -38,6 +41,7 @@ DEFAULT_MOVING_SPHERES = 1
 DEFAULT_MOTION = "circle"
 DEFAULT_SPHERE_RADIUS = 0.25
 DEFAULT_SPHERE_RGBA = (1.0, 0.0, 0.0, 1.0)
+IDENTITY_QUAT = jnp.array([1.0, 0.0, 0.0, 0.0])
 
 GOAL = np.array([3.0, 3.0])
 WORLD_MIN = np.array([0.0, 0.0, 0.0])
@@ -113,26 +117,11 @@ class MovingSphere:
 def parse_args():
     parser = argparse.ArgumentParser(description="Run Safe-APF with a static XML map and optional moving spheres.")
     parser.add_argument("map_xml", type=Path, help="XML file containing the static environment and static obstacles.")
-    parser.add_argument(
-        "--moving-spheres",
-        type=int,
-        default=DEFAULT_MOVING_SPHERES,
-        help="Number of moving sphere obstacles to add at runtime.",
-    )
-    parser.add_argument(
-        "--motion",
-        choices=["static", "circle", "random"],
-        default=DEFAULT_MOTION,
-        help="Motion model used for all moving spheres.",
-    )
+    parser.add_argument("--moving-spheres", type=int, default=DEFAULT_MOVING_SPHERES, help="Number of moving sphere obstacles to add at runtime.")
+    parser.add_argument("--motion", choices=["static", "circle", "random"], default=DEFAULT_MOTION, help="Motion model used for all moving spheres.")
     parser.add_argument("--save-video", action="store_true", help="Save an MP4 capture of the simulation.")
     parser.add_argument("--no-vis", action="store_true", help="Disable live rendering and the final matplotlib plot.")
-    parser.add_argument(
-        "--timeout",
-        type=float,
-        default=DEFAULT_TIMEOUT,
-        help="Simulation timeout in seconds.",
-    )
+    parser.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT, help="Simulation timeout in seconds.")
     return parser.parse_args()
 
 
@@ -164,15 +153,9 @@ def parse_map(map_xml: Path):
     goal_body = worldbody.find("./body[@name='goal']")
 
     if None in (wall_xn, wall_xp, wall_yn, wall_yp, ceiling, goal_body):
-        raise ValueError(
-            "Map XML must define wall_xn, wall_xp, wall_yn, wall_yp, ceiling, and a goal body."
-        )
+        raise ValueError("Map XML must define wall_xn, wall_xp, wall_yn, wall_yp, ceiling, and a goal body.")
 
-    world_min = np.array([
-        parse_vec(wall_xn.attrib["pos"], 3)[0],
-        parse_vec(wall_yn.attrib["pos"], 3)[1],
-        0.0,
-    ])
+    world_min = np.array([parse_vec(wall_xn.attrib["pos"], 3)[0], parse_vec(wall_yn.attrib["pos"], 3)[1], 0.0])
     world_max = np.array([
         parse_vec(wall_xp.attrib["pos"], 3)[0],
         parse_vec(wall_yp.attrib["pos"], 3)[1],
@@ -198,26 +181,22 @@ def parse_map(map_xml: Path):
 
         if geom_type == "box":
             size = parse_vec(geom.attrib["size"], 3)
-            static_boxes.append(
-                {
-                    "name": name,
-                    "center": pos[:2],
-                    "half_extents": size[:2],
-                    "angle_deg": float(euler[2]),
-                    "z": float(pos[2]),
-                    "rgba": rgba,
-                }
-            )
+            static_boxes.append({
+                "name": name,
+                "center": pos[:2],
+                "half_extents": size[:2],
+                "angle_deg": float(euler[2]),
+                "z": float(pos[2]),
+                "rgba": rgba,
+            })
         elif geom_type == "sphere":
-            static_spheres.append(
-                {
-                    "name": name,
-                    "center": pos[:2],
-                    "radius": float(parse_vec(geom.attrib["size"], 1)[0]),
-                    "z": float(pos[2]),
-                    "rgba": rgba,
-                }
-            )
+            static_spheres.append({
+                "name": name,
+                "center": pos[:2],
+                "radius": float(parse_vec(geom.attrib["size"], 1)[0]),
+                "z": float(pos[2]),
+                "rgba": rgba,
+            })
 
     return world_min, world_max, goal, static_boxes, static_spheres
 
@@ -254,9 +233,75 @@ def build_moving_sphere_specs(count: int, motion: str):
     return specs
 
 
+def create_runtime_map(map_xml: Path, moving_spheres):
+    if not moving_spheres:
+        return map_xml, None
+
+    tree = ET.parse(map_xml)
+    root = tree.getroot()
+    worldbody = root.find("worldbody")
+    if worldbody is None:
+        raise ValueError(f"{map_xml} is missing <worldbody>.")
+
+    for obstacle in moving_spheres:
+        body = ET.SubElement(
+            worldbody,
+            "body",
+            {
+                "name": obstacle.name,
+                "mocap": "true",
+                "pos": f"{obstacle.center[0]:g} {obstacle.center[1]:g} {obstacle.z:g}",
+            },
+        )
+        ET.SubElement(
+            body,
+            "geom",
+            {
+                "type": "sphere",
+                "size": f"{obstacle.radius:g}",
+                "rgba": " ".join(f"{v:g}" for v in obstacle.rgba),
+                "contype": "1",
+                "conaffinity": "1",
+                "density": "1000",
+            },
+        )
+
+    tmp = tempfile.NamedTemporaryFile(suffix=".xml", delete=False)
+    tmp_path = Path(tmp.name)
+    tree.write(tmp_path, encoding="unicode")
+    tmp.close()
+    return tmp_path, tmp_path
+
+
 def update_obstacles(obstacles, t, dt):
     for obstacle in obstacles:
         obstacle.update(t, dt)
+
+
+def sync_moving_spheres_to_sim(sim, moving_spheres, mocap_ids):
+    if not moving_spheres:
+        return
+
+    mocap_pos = sim.mjx_data.mocap_pos
+    mocap_quat = sim.mjx_data.mocap_quat
+    for obstacle, mocap_id in zip(moving_spheres, mocap_ids):
+        pos = jnp.array([obstacle.center[0], obstacle.center[1], obstacle.z])
+        mocap_pos = mocap_pos.at[0, mocap_id].set(pos)
+        mocap_quat = mocap_quat.at[0, mocap_id].set(IDENTITY_QUAT)
+    sim.mjx_data = sim.mjx_data.replace(mocap_pos=mocap_pos, mocap_quat=mocap_quat)
+
+
+def get_mocap_ids(sim, moving_spheres):
+    mocap_ids = []
+    for obstacle in moving_spheres:
+        body_id = mujoco.mj_name2id(sim.mj_model, mujoco.mjtObj.mjOBJ_BODY, obstacle.name)
+        if body_id < 0:
+            raise ValueError(f"Moving sphere body {obstacle.name!r} not found in MuJoCo model.")
+        mocap_id = sim.mj_model.body_mocapid[body_id]
+        if mocap_id < 0:
+            raise ValueError(f"Body {obstacle.name!r} is not a mocap body.")
+        mocap_ids.append(int(mocap_id))
+    return mocap_ids
 
 
 def print_free_cam(sim):
@@ -361,13 +406,7 @@ def wall_repulsion_2d(p, wall, eta, Qstar):
 
 def wall_polygon(wall):
     hx, hy = wall["half_extents"]
-    local_corners = np.array([
-        [-hx, -hy],
-        [hx, -hy],
-        [hx, hy],
-        [-hx, hy],
-        [-hx, -hy],
-    ])
+    local_corners = np.array([[-hx, -hy], [hx, -hy], [hx, hy], [-hx, hy], [-hx, -hy]])
     return np.array([wall_world_point(corner, wall) for corner in local_corners])
 
 
@@ -460,7 +499,7 @@ def rollout_preview(start, theta, moving_spheres, params, steps=PREVIEW_STEPS, s
     return np.array(path)
 
 
-def draw_scene(sim, preview_path, moving_spheres, start_pos):
+def draw_scene(sim, preview_path, start_pos):
     if len(preview_path) >= 2:
         draw_line(
             sim,
@@ -472,14 +511,6 @@ def draw_scene(sim, preview_path, moving_spheres, start_pos):
 
     draw_points(sim, np.array([[GOAL[0], GOAL[1], Z_REF]]), rgba=np.array([0.0, 1.0, 0.2, 1.0]), size=0.08)
     draw_points(sim, np.array([[start_pos[0], start_pos[1], Z_REF]]), rgba=np.array([1.0, 1.0, 1.0, 0.8]), size=0.05)
-
-    for obstacle in moving_spheres:
-        draw_points(
-            sim,
-            np.array([[obstacle.center[0], obstacle.center[1], obstacle.z]]),
-            rgba=np.array(obstacle.rgba),
-            size=obstacle.radius,
-        )
 
 
 def plot_results(traj, obstacle_traces, moving_spheres):
@@ -539,20 +570,16 @@ def main():
 
     WORLD_MIN, WORLD_MAX, GOAL, STATIC_BOX_OBSTACLES, STATIC_SPHERE_OBSTACLES = parse_map(map_xml)
     moving_spheres = build_moving_sphere_specs(args.moving_spheres, args.motion)
+    runtime_xml, temp_xml = create_runtime_map(map_xml, moving_spheres)
 
-    sim = Sim(control=Control.state, xml_path=map_xml)
+    sim = Sim(control=Control.state, xml_path=runtime_xml)
     use_box_collision(sim, enable=True)
     sim.reset()
 
-    params = dict(
-        zeta=1.1547,
-        eta=0.0732,
-        dstar=0.3,
-        Qstar=0.5,
-        dsafe=0.2,
-        dvort=0.35,
-        alpha_th=np.deg2rad(5),
-    )
+    mocap_ids = get_mocap_ids(sim, moving_spheres)
+    sync_moving_spheres_to_sim(sim, moving_spheres, mocap_ids)
+
+    params = dict(zeta=1.1547, eta=0.0732, dstar=0.3, Qstar=0.5, dsafe=0.2, dvort=0.35, alpha_th=np.deg2rad(5))
 
     fps = CAPTURE_FPS
     sim_steps = int(args.timeout * CTRL_FREQ)
@@ -569,6 +596,7 @@ def main():
         for step in range(sim_steps):
             t = step / CTRL_FREQ
             update_obstacles(moving_spheres, t, 1.0 / CTRL_FREQ)
+            sync_moving_spheres_to_sim(sim, moving_spheres, mocap_ids)
 
             states = sim.data.states
             pos = states.pos[0, 0]
@@ -606,26 +634,15 @@ def main():
 
             if (show_window or args.save_video) and (step * fps) % sim.control_freq < fps:
                 preview_path = rollout_preview(p, theta, moving_spheres, params)
-                draw_scene(sim, preview_path, moving_spheres, start_pos)
+                draw_scene(sim, preview_path, start_pos)
 
                 if args.save_video:
-                    frame = sim.render(
-                        mode="rgb_array",
-                        camera=CAPTURE_CAMERA,
-                        cam_config=FREE_CAM,
-                        width=CAPTURE_WIDTH,
-                        height=CAPTURE_HEIGHT,
-                    )
+                    frame = sim.render(mode="rgb_array", camera=CAPTURE_CAMERA, cam_config=FREE_CAM, width=CAPTURE_WIDTH, height=CAPTURE_HEIGHT)
                     if frame is not None:
                         video_frames.append(frame)
 
                 if show_window:
-                    sim.render(
-                        camera=CAPTURE_CAMERA,
-                        cam_config=FREE_CAM,
-                        width=CAPTURE_WIDTH,
-                        height=CAPTURE_HEIGHT,
-                    )
+                    sim.render(camera=CAPTURE_CAMERA, cam_config=FREE_CAM, width=CAPTURE_WIDTH, height=CAPTURE_HEIGHT)
         else:
             print("Time limit reached.")
     finally:
@@ -637,6 +654,8 @@ def main():
             print(f"Saved capture to {output_path}")
         print_free_cam(sim)
         sim.close()
+        if temp_xml is not None:
+            temp_xml.unlink(missing_ok=True)
 
     if not args.no_vis:
         plot_results(traj, obstacle_traces, moving_spheres)

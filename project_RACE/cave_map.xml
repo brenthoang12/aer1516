@@ -8,15 +8,15 @@
     <worldbody>
         <geom name="floor" type="plane" size="0 0 0.05" rgba="0.8 0.8 0.8 1"/>
 
-        <geom name="ceiling" type="box" pos="3.0 3.5 3.0" size="3.0 3.5 0.02"
+        <geom name="ceiling" type="box" pos="3.0 3.5 1.0" size="3.0 3.5 0.02"
               material="boundary" contype="0" conaffinity="0"/>
-        <geom name="wall_xn" type="box" pos="0.0 3.5 1.5" size="0.02 3.5 1.5"
+        <geom name="wall_xn" type="box" pos="0.0 3.5 0.5" size="0.02 3.5 0.5"
               material="boundary" contype="0" conaffinity="0"/>
-        <geom name="wall_xp" type="box" pos="6.0 3.5 1.5" size="0.02 3.5 1.5"
+        <geom name="wall_xp" type="box" pos="6.0 3.5 0.5" size="0.02 3.5 0.5"
               material="boundary" contype="0" conaffinity="0"/>
-        <geom name="wall_yn" type="box" pos="3.0 0.0 1.5" size="3.0 0.02 1.5"
+        <geom name="wall_yn" type="box" pos="3.0 0.0 0.5" size="3.0 0.02 0.5"
               material="boundary" contype="0" conaffinity="0"/>
-        <geom name="wall_yp" type="box" pos="3.0 7.0 1.5" size="3.0 0.02 1.5"
+        <geom name="wall_yp" type="box" pos="3.0 7.0 0.5" size="3.0 0.02 0.5"
               material="boundary" contype="0" conaffinity="0"/>
 
         <body name="uwall_bottom" pos="1.81819805 1.81819805 0" euler="0 0 -45">
@@ -40,7 +40,7 @@
                   density="1000"/>
         </body>
 
-        <body name="goal" pos="3 3 0.5">
+        <body name="goal" pos="5.4 6.4 0.5">
             <geom type="sphere" size="0.1"
                   rgba="0 1 0 1"
                   contype="0" conaffinity="0"/>
