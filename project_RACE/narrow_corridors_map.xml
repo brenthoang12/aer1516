@@ -1,0 +1,106 @@
+<mujoco model="Safe APF Narrow Corridors Map">
+    <option timestep="0.001"/>
+
+    <asset>
+        <material name="boundary" rgba="0.5 0.7 0.9 0.12"/>
+    </asset>
+
+    <worldbody>
+        <geom name="floor" type="plane" size="0 0 0.05" rgba="0.8 0.8 0.8 1"/>
+
+        <geom name="ceiling" type="box" pos="3.0 3.5 1.0" size="3.0 3.5 0.02"
+              material="boundary" contype="0" conaffinity="0"/>
+        <geom name="wall_xn" type="box" pos="0.0 3.5 0.5" size="0.02 3.5 0.5"
+              material="boundary" contype="0" conaffinity="0"/>
+        <geom name="wall_xp" type="box" pos="6.0 3.5 0.5" size="0.02 3.5 0.5"
+              material="boundary" contype="0" conaffinity="0"/>
+        <geom name="wall_yn" type="box" pos="3.0 0.0 0.5" size="3.0 0.02 0.5"
+              material="boundary" contype="0" conaffinity="0"/>
+        <geom name="wall_yp" type="box" pos="3.0 7.0 0.5" size="3.0 0.02 0.5"
+              material="boundary" contype="0" conaffinity="0"/>
+
+        <!-- Eight vertical walls with equal x spacing across the middle third: x in [2, 4] -->
+        <body name="corridor_wall_0" pos="0.0 3.5 0.0">
+            <geom type="box" size="0.05 2.5 0.5"
+                  rgba="0.8 0.2 0.2 1"
+                  contype="1" conaffinity="1"
+                  density="1000"/>
+        </body>
+
+        <body name="corridor_wall_1" pos="0.6 3.5 0.0">
+            <geom type="box" size="0.05 2.5 0.5"
+                  rgba="0.8 0.2 0.2 1"
+                  contype="1" conaffinity="1"
+                  density="1000"/>
+        </body>
+
+        <body name="corridor_wall_2" pos="1.2 3.5 0.0">
+            <geom type="box" size="0.05 2.5 0.5"
+                  rgba="0.8 0.2 0.2 1"
+                  contype="1" conaffinity="1"
+                  density="1000"/>
+        </body>
+
+        <body name="corridor_wall_3" pos="1.8 3.5 0.0">
+            <geom type="box" size="0.05 2.5 0.5"
+                  rgba="0.8 0.2 0.2 1"
+                  contype="1" conaffinity="1"
+                  density="1000"/>
+        </body>
+
+        <body name="corridor_wall_4" pos="2.4 3.5 0.0">
+            <geom type="box" size="0.05 2.5 0.5"
+                  rgba="0.8 0.2 0.2 1"
+                  contype="1" conaffinity="1"
+                  density="1000"/>
+        </body>
+
+        <body name="corridor_wall_5" pos="3.0 3.5 0.0">
+            <geom type="box" size="0.05 2.5 0.5"
+                  rgba="0.8 0.2 0.2 1"
+                  contype="1" conaffinity="1"
+                  density="1000"/>
+        </body>
+
+        <body name="corridor_wall_6" pos="3.6 3.5 0.0">
+            <geom type="box" size="0.05 2.5 0.5"
+                  rgba="0.8 0.2 0.2 1"
+                  contype="1" conaffinity="1"
+                  density="1000"/>
+        </body>
+
+        <body name="corridor_wall_7" pos="4.2 3.5 0.0">
+            <geom type="box" size="0.05 2.5 0.5"
+                  rgba="0.8 0.2 0.2 1"
+                  contype="1" conaffinity="1"
+                  density="1000"/>
+        </body>
+
+        <body name="corridor_wall_8" pos="4.8 3.5 0.0">
+            <geom type="box" size="0.05 2.5 0.5"
+                  rgba="0.8 0.2 0.2 1"
+                  contype="1" conaffinity="1"
+                  density="1000"/>
+        </body>
+
+        <body name="corridor_wall_9" pos="5.4 3.5 0.0">
+            <geom type="box" size="0.05 2.5 0.5"
+                  rgba="0.8 0.2 0.2 1"
+                  contype="1" conaffinity="1"
+                  density="1000"/>
+        </body>
+
+        <body name="corridor_wall_10" pos="6.0 3.5 0.0">
+            <geom type="box" size="0.05 2.5 0.5"
+                  rgba="0.8 0.2 0.2 1"
+                  contype="1" conaffinity="1"
+                  density="1000"/>
+        </body>
+
+        <body name="goal" pos="5.5 6.5 0.5">
+            <geom type="sphere" size="0.1"
+                  rgba="0 1 0 1"
+                  contype="0" conaffinity="0"/>
+        </body>
+    </worldbody>
+</mujoco>
