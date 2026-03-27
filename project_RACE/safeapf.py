@@ -20,7 +20,7 @@ PREVIEW_STEPS = 12
 CTRL_FREQ = 100
 Z_REF = 0.5
 YAW_REF = 0.0
-STEP_GAIN = 0.15
+STEP_GAIN = 0.05
 GOAL_TOL = 0.05
 
 FREE_CAM = {
@@ -447,7 +447,7 @@ def apf_gradient(p, theta, moving_spheres, params):
             drel = (dist - dsafe) / (dvort - dsafe)
         drel = np.clip(drel, 0.0, 1.0)
 
-        gamma = np.pi * direction_sign * drel
+        gamma = 1.15 * np.pi * direction_sign * drel
         grad_rep_total += rotmat(gamma) @ grad_rep
 
     for wall in STATIC_BOX_OBSTACLES:
@@ -575,14 +575,14 @@ def main():
     moving_spheres = build_moving_sphere_specs(args.moving_spheres, args.motion)
     runtime_xml, temp_xml = create_runtime_map(map_xml, moving_spheres)
 
-    sim = Sim(control=Control.state, xml_path=runtime_xml, device="gpu")
+    sim = Sim(control=Control.state, xml_path=runtime_xml, device="cpu")
     use_box_collision(sim, enable=True)
     sim.reset()
 
     mocap_ids = get_mocap_ids(sim, moving_spheres)
     sync_moving_spheres_to_sim(sim, moving_spheres, mocap_ids)
 
-    params = dict(zeta=1.1547, eta=0.0732, dstar=0.3, Qstar=0.5, dsafe=0.2, dvort=0.35, alpha_th=np.deg2rad(5))
+    params = dict(zeta=1.1547, eta=0.09, dstar=0.3, Qstar=0.6, dsafe=0.15, dvort=0.4, alpha_th=np.deg2rad(12))
 
     fps = CAPTURE_FPS
     sim_steps = int(args.timeout * CTRL_FREQ)
