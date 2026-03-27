@@ -122,6 +122,11 @@ def parse_args():
     parser.add_argument("--save-video", action="store_true", help="Save an MP4 capture of the simulation.")
     parser.add_argument("--no-vis", action="store_true", help="Disable live rendering and the final matplotlib plot.")
     parser.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT, help="Simulation timeout in seconds.")
+
+    # NEW FLAG: enable Safe‑APF vortex rotation
+    parser.add_argument("--safe-apf", action="store_true",
+                        help="Enable Safe-APF vortex field. If not set, uses regular APF.")
+
     return parser.parse_args()
 
 
@@ -410,7 +415,7 @@ def wall_polygon(wall):
     return np.array([wall_world_point(corner, wall) for corner in local_corners])
 
 
-def apf_gradient(p, theta, moving_spheres, params):
+def apf_gradient(p, theta, moving_spheres, params, safe_apf=True):
     zeta = params["zeta"]
     eta = params["eta"]
     dstar = params["dstar"]
@@ -419,6 +424,7 @@ def apf_gradient(p, theta, moving_spheres, params):
     dvort = params["dvort"]
     alpha_th = params["alpha_th"]
 
+    # Attractive potential
     diff_goal = p - GOAL
     d_goal = np.linalg.norm(diff_goal)
     if d_goal <= dstar:
@@ -428,6 +434,9 @@ def apf_gradient(p, theta, moving_spheres, params):
 
     grad_rep_total = np.zeros(2)
 
+    # -----------------------------
+    # SPHERES
+    # -----------------------------
     for sphere in [*STATIC_SPHERE_OBSTACLES, *moving_spheres]:
         nearest = sphere_nearest_point(p, sphere)
         dist = max(np.linalg.norm(p - nearest), 1e-6)
@@ -435,8 +444,14 @@ def apf_gradient(p, theta, moving_spheres, params):
             continue
 
         grad_rep = sphere_repulsion_2d(p, sphere, eta, Qstar)
-        alpha = theta - np.arctan2(nearest[1] - p[1], nearest[0] - p[0])
-        alpha = wrap(alpha)
+
+        # Regular APF (no vortex)
+        if not safe_apf:
+            grad_rep_total += grad_rep
+            continue
+
+        # Safe‑APF vortex rotation
+        alpha = wrap(theta - np.arctan2(nearest[1] - p[1], nearest[0] - p[0]))
         direction_sign = 1 if abs(alpha) <= alpha_th else -1
 
         if dist <= dsafe:
@@ -445,11 +460,13 @@ def apf_gradient(p, theta, moving_spheres, params):
             drel = 1.0
         else:
             drel = (dist - dsafe) / (dvort - dsafe)
-        drel = np.clip(drel, 0.0, 1.0)
 
         gamma = 1.15 * np.pi * direction_sign * drel
         grad_rep_total += rotmat(gamma) @ grad_rep
 
+    # -----------------------------
+    # WALLS
+    # -----------------------------
     for wall in STATIC_BOX_OBSTACLES:
         nearest = wall_nearest_point(p, wall)
         dist = max(np.linalg.norm(p - nearest), 1e-6)
@@ -457,11 +474,14 @@ def apf_gradient(p, theta, moving_spheres, params):
             continue
 
         grad_rep = wall_repulsion_2d(p, wall, eta, Qstar)
-        if np.linalg.norm(grad_rep) < 1e-9:
+
+        # Regular APF
+        if not safe_apf:
+            grad_rep_total += grad_rep
             continue
 
-        alpha = theta - np.arctan2(nearest[1] - p[1], nearest[0] - p[0])
-        alpha = wrap(alpha)
+        # Safe‑APF vortex
+        alpha = wrap(theta - np.arctan2(nearest[1] - p[1], nearest[0] - p[0]))
         direction_sign = 1 if abs(alpha) <= alpha_th else -1
 
         if dist <= dsafe:
@@ -470,7 +490,6 @@ def apf_gradient(p, theta, moving_spheres, params):
             drel = 1.0
         else:
             drel = (dist - dsafe) / (dvort - dsafe)
-        drel = np.clip(drel, 0.0, 1.0)
 
         gamma = np.pi * direction_sign * drel
         grad_rep_total += rotmat(gamma) @ grad_rep
@@ -478,24 +497,33 @@ def apf_gradient(p, theta, moving_spheres, params):
     return grad_att + grad_rep_total
 
 
-def rollout_preview(start, theta, moving_spheres, params, steps=PREVIEW_STEPS, step_gain=STEP_GAIN):
+def rollout_preview(start, theta, moving_spheres, params, safe_apf=True,
+                    steps=PREVIEW_STEPS, step_gain=STEP_GAIN):
     path = [start.copy()]
     p = start.copy()
     heading = theta
+
     for _ in range(steps):
         if np.linalg.norm(p - GOAL) < GOAL_TOL:
             break
-        g = apf_gradient(p, heading, moving_spheres, params)
+
+        # Pass safe_apf into APF
+        g = apf_gradient(p, heading, moving_spheres, params, safe_apf=safe_apf)
+
         direction = -g
         norm_dir = np.linalg.norm(direction)
         if norm_dir < 1e-6:
             break
+
         direction /= norm_dir
         p = p + step_gain * direction
+
         p[0] = np.clip(p[0], WORLD_MIN[0] + 0.01, WORLD_MAX[0] - 0.01)
         p[1] = np.clip(p[1], WORLD_MIN[1] + 0.01, WORLD_MAX[1] - 0.01)
+
         heading = np.arctan2(direction[1], direction[0])
         path.append(p.copy())
+
     return np.array(path)
 
 
@@ -615,7 +643,7 @@ def main():
                 print("Reached goal.")
                 break
 
-            g = apf_gradient(p, theta, moving_spheres, params)
+            g = apf_gradient(p, theta, moving_spheres, params, safe_apf=args.safe_apf)
             direction = -g
             norm_dir = np.linalg.norm(direction)
             if norm_dir > 1e-6:
@@ -637,7 +665,7 @@ def main():
             sim.step(sim.freq // sim.control_freq)
 
             if (show_window or args.save_video) and (step * fps) % sim.control_freq < fps:
-                preview_path = rollout_preview(p, theta, moving_spheres, params)
+                preview_path = rollout_preview(p, theta, moving_spheres, params, safe_apf=args.safe_apf)
                 draw_scene(sim, preview_path, start_pos)
 
                 if args.save_video:
