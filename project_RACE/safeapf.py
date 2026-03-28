@@ -602,11 +602,9 @@ def main():
         raise ValueError("--moving-spheres must be non-negative.")
     if args.timeout <= 0.0:
         raise ValueError("--timeout must be positive.")
-
     WORLD_MIN, WORLD_MAX, GOAL, STATIC_BOX_OBSTACLES, STATIC_SPHERE_OBSTACLES = parse_map(map_xml)
     moving_spheres = build_moving_sphere_specs(args.moving_spheres, args.motion)
     runtime_xml, temp_xml = create_runtime_map(map_xml, moving_spheres)
-
     sim = Sim(control=Control.state, xml_path=runtime_xml, device="cpu")
     use_box_collision(sim, enable=True)
     sim.reset()
@@ -689,7 +687,9 @@ def main():
         if args.save_video and video_frames:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             CAPTURE_DIR.mkdir(parents=True, exist_ok=True)
-            output_stem = CAPTURE_DIR / f"safeapf_capture_Cam{CAPTURE_CAMERA}_{timestamp}"
+            map_str = str(args.map_xml)
+            map_str = map_str.replace(".", "")
+            output_stem = CAPTURE_DIR / f"safeapf_{map_str}_NumMovObs-{args.moving_spheres}_{args.motion}_{timestamp}"
             output_path = output_stem.with_suffix(".mp4")
             iio.imwrite(output_path, video_frames, fps=CAPTURE_FPS)
             print(f"Saved capture to {output_path}")
@@ -698,9 +698,8 @@ def main():
         if temp_xml is not None:
             temp_xml.unlink(missing_ok=True)
 
-    if not args.no_vis:
-        plot_path = output_stem.with_suffix(".png") if output_stem is not None else None
-        plot_results(traj, obstacle_traces, moving_spheres, plot_path=plot_path, title=plot_title)
+    plot_path = output_stem.with_suffix(".png") if output_stem is not None else None
+    plot_results(traj, obstacle_traces, moving_spheres, plot_path=plot_path, title=plot_title)
 
 
 if __name__ == "__main__":
