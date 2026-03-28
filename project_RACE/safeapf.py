@@ -2,6 +2,8 @@ import argparse
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+import shlex
+import sys
 import tempfile
 import xml.etree.ElementTree as ET
 
@@ -541,7 +543,7 @@ def draw_scene(sim, preview_path, start_pos):
     draw_points(sim, np.array([[start_pos[0], start_pos[1], Z_REF]]), rgba=np.array([1.0, 1.0, 1.0, 0.8]), size=0.05)
 
 
-def plot_results(traj, obstacle_traces, moving_spheres, plot_path=None):
+def plot_results(traj, obstacle_traces, moving_spheres, plot_path=None, title=None):
     import matplotlib.pyplot as plt
 
     traj = np.array(traj)
@@ -580,7 +582,7 @@ def plot_results(traj, obstacle_traces, moving_spheres, plot_path=None):
         plt.scatter(traj[0, 0], traj[0, 1], c="w", edgecolors="k", s=50, label="Start")
     plt.scatter(GOAL[0], GOAL[1], c="g", marker="x", s=80, label="Goal")
     plt.legend()
-    plt.title("Safe-APF with moving spheres and live preview")
+    plt.title(title or "RACE")
     if plot_path is not None:
         plt.savefig(plot_path, dpi=200, bbox_inches="tight")
         print(f"Saved plot to {plot_path}")
@@ -591,6 +593,8 @@ def main():
     global GOAL, WORLD_MIN, WORLD_MAX, STATIC_BOX_OBSTACLES, STATIC_SPHERE_OBSTACLES
 
     args = parse_args()
+    title_tokens = [tok for tok in sys.argv[1:] if tok not in {"--save-video", "--no-vis"}]
+    plot_title = f"safeapf.py {' '.join(shlex.quote(tok) for tok in title_tokens)}".strip() 
     map_xml = args.map_xml.resolve()
     if not map_xml.exists():
         raise FileNotFoundError(f"Map XML not found: {map_xml}")
@@ -666,15 +670,19 @@ def main():
 
             if (show_window or args.save_video) and (step * fps) % sim.control_freq < fps:
                 preview_path = rollout_preview(p, theta, moving_spheres, params, safe_apf=args.safe_apf)
-                draw_scene(sim, preview_path, start_pos)
+                if show_window:
+                    # Draw overlays onto the currently active (window) viewer.
+                    draw_scene(sim, preview_path, start_pos)
+                    sim.render(camera=CAPTURE_CAMERA, cam_config=FREE_CAM, width=CAPTURE_WIDTH, height=CAPTURE_HEIGHT)
 
                 if args.save_video:
+                    # Offscreen and window viewers keep separate marker buffers.
+                    # Prime/select the rgb viewer, then redraw overlays for capture.
+                    sim.render(mode="rgb_array", camera=CAPTURE_CAMERA, cam_config=FREE_CAM, width=CAPTURE_WIDTH, height=CAPTURE_HEIGHT)
+                    draw_scene(sim, preview_path, start_pos)
                     frame = sim.render(mode="rgb_array", camera=CAPTURE_CAMERA, cam_config=FREE_CAM, width=CAPTURE_WIDTH, height=CAPTURE_HEIGHT)
                     if frame is not None:
                         video_frames.append(frame)
-
-                if show_window:
-                    sim.render(camera=CAPTURE_CAMERA, cam_config=FREE_CAM, width=CAPTURE_WIDTH, height=CAPTURE_HEIGHT)
         else:
             print("Time limit reached.")
     finally:
@@ -692,7 +700,7 @@ def main():
 
     if not args.no_vis:
         plot_path = output_stem.with_suffix(".png") if output_stem is not None else None
-        plot_results(traj, obstacle_traces, moving_spheres, plot_path=plot_path)
+        plot_results(traj, obstacle_traces, moving_spheres, plot_path=plot_path, title=plot_title)
 
 
 if __name__ == "__main__":
