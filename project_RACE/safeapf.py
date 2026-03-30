@@ -22,7 +22,9 @@ PREVIEW_STEPS = 12
 CTRL_FREQ = 100
 Z_REF = 0.5
 YAW_REF = 0.0
-STEP_GAIN = 0.05
+STEP_GAIN = 0.30
+FINAL_APPROACH_DIST = 1.5
+FINAL_APPROACH_ZETA_SCALE = 3.0
 GOAL_TOL = 0.05
 
 FREE_CAM = {
@@ -125,9 +127,10 @@ def parse_args():
     parser.add_argument("--no-vis", action="store_true", help="Disable live rendering and the final matplotlib plot.")
     parser.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT, help="Simulation timeout in seconds.")
 
-    # NEW FLAG: enable Safe‑APF vortex rotation
-    parser.add_argument("--safe-apf", action="store_true",
-                        help="Enable Safe-APF vortex field. If not set, uses regular APF.")
+    # Safe‑APF vortex rotation is ON by default; pass --no-safe-apf to disable
+    parser.add_argument("--no-safe-apf", dest="safe_apf", action="store_false",
+                        help="Disable Safe-APF vortex field and use regular APF instead.")
+    parser.set_defaults(safe_apf=True)
 
     return parser.parse_args()
 
@@ -417,6 +420,48 @@ def wall_polygon(wall):
     return np.array([wall_world_point(corner, wall) for corner in local_corners])
 
 
+def _segment_min_dist_to_point(a, b, pt):
+    """Minimum distance from point pt to segment ab."""
+    ab = b - a
+    t = np.dot(pt - a, ab) / (np.dot(ab, ab) + 1e-12)
+    t = np.clip(t, 0.0, 1.0)
+    return np.linalg.norm((a + t * ab) - pt)
+
+
+def los_clear(p, goal, moving_spheres):
+    """Return True if the segment from p to goal is free of all obstacles."""
+    for sphere in [*STATIC_SPHERE_OBSTACLES, *moving_spheres]:
+        center = sphere.center if isinstance(sphere, MovingSphere) else sphere["center"]
+        radius = sphere.radius if isinstance(sphere, MovingSphere) else sphere["radius"]
+        if _segment_min_dist_to_point(p, goal, center) <= radius:
+            return False
+
+    for wall in STATIC_BOX_OBSTACLES:
+        # Transform segment into wall's local (axis-aligned) frame
+        a_local = wall_local_point(p, wall)
+        b_local = wall_local_point(goal, wall)
+        half = wall["half_extents"]
+        # Check if segment intersects the AABB [-half, +half] using slab method
+        d = b_local - a_local
+        t_min, t_max = 0.0, 1.0
+        for axis in range(2):
+            if abs(d[axis]) < 1e-12:
+                if a_local[axis] < -half[axis] or a_local[axis] > half[axis]:
+                    t_min = 1.0  # parallel and outside — no hit
+                    break
+            else:
+                t1 = (-half[axis] - a_local[axis]) / d[axis]
+                t2 = (half[axis] - a_local[axis]) / d[axis]
+                if t1 > t2:
+                    t1, t2 = t2, t1
+                t_min = max(t_min, t1)
+                t_max = min(t_max, t2)
+        if t_min <= t_max:
+            return False
+
+    return True
+
+
 def apf_gradient(p, theta, moving_spheres, params, safe_apf=True):
     zeta = params["zeta"]
     eta = params["eta"]
@@ -433,6 +478,10 @@ def apf_gradient(p, theta, moving_spheres, params, safe_apf=True):
         grad_att = zeta * diff_goal
     else:
         grad_att = zeta * dstar * diff_goal / (d_goal + 1e-9)
+
+    # Final approach: if close and line-of-sight is clear, skip repulsion
+    if d_goal < FINAL_APPROACH_DIST and los_clear(p, GOAL, moving_spheres):
+        return grad_att
 
     grad_rep_total = np.zeros(2)
 
@@ -612,7 +661,7 @@ def main():
     mocap_ids = get_mocap_ids(sim, moving_spheres)
     sync_moving_spheres_to_sim(sim, moving_spheres, mocap_ids)
 
-    params = dict(zeta=1.1547, eta=0.09, dstar=0.3, Qstar=0.6, dsafe=0.15, dvort=0.4, alpha_th=np.deg2rad(12))
+    params = dict(zeta=5.0, eta=1.25, dstar=1.5, Qstar=10.0, dsafe=0.1, dvort=4.0, alpha_th=np.deg2rad(75))
 
     fps = CAPTURE_FPS
     sim_steps = int(args.timeout * CTRL_FREQ)
@@ -645,6 +694,9 @@ def main():
                 print("Reached goal.")
                 break
 
+            d_goal = np.linalg.norm(p - GOAL)
+            final_approach = d_goal < FINAL_APPROACH_DIST and los_clear(p, GOAL, moving_spheres)
+
             g = apf_gradient(p, theta, moving_spheres, params, safe_apf=args.safe_apf)
             direction = -g
             norm_dir = np.linalg.norm(direction)
@@ -653,7 +705,10 @@ def main():
             else:
                 direction = np.zeros(2)
 
-            p_des = p + STEP_GAIN * direction
+            step = STEP_GAIN * (FINAL_APPROACH_ZETA_SCALE if final_approach else 1.0)
+            if final_approach:
+                step = min(step, d_goal)  # ease in: never step past the goal
+            p_des = p + step * direction
             p_des[0] = np.clip(p_des[0], WORLD_MIN[0] + 0.01, WORLD_MAX[0] - 0.01)
             p_des[1] = np.clip(p_des[1], WORLD_MIN[1] + 0.01, WORLD_MAX[1] - 0.01)
 
