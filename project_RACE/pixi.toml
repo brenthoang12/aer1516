@@ -11,9 +11,11 @@ version = "0.1.0"
 python = ">=3.11,<3.14"
 pip = "*"
 matplotlib = ">=3.10.8,<4"
+warp-lang = ">=1.11.1,<2"
+mujoco-warp = ">=3.5.0.2,<4"
 
 [pypi-dependencies]
-crazyflow = { path = "./crazyflow", editable = true }
+crazyflow = { path = "/home/marcbishara/codefiles/aer1516/project_RACE/crazyflow", editable = true }
 imageio-ffmpeg = "*"
 
 [feature.gpu.pypi-dependencies]

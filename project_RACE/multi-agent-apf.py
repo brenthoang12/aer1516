@@ -119,15 +119,18 @@ class MovingSphere:
 def parse_args():
     parser = argparse.ArgumentParser(description="Run Safe-APF with a static XML map and optional moving spheres.")
     parser.add_argument("map_xml", type=Path, help="XML file containing the static environment and static obstacles.")
-    parser.add_argument("--moving-spheres", type=int, default=DEFAULT_MOVING_SPHERES, help="Number of moving sphere obstacles to add at runtime.")
-    parser.add_argument("--motion", choices=["static", "circle", "random"], default=DEFAULT_MOTION, help="Motion model used for all moving spheres.")
-    parser.add_argument("--save-video", action="store_true", help="Save an MP4 capture of the simulation.")
-    parser.add_argument("--no-vis", action="store_true", help="Disable live rendering and the final matplotlib plot.")
-    parser.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT, help="Simulation timeout in seconds.")
+    parser.add_argument("--moving-spheres", type=int, default=DEFAULT_MOVING_SPHERES)
+    parser.add_argument("--motion", choices=["static", "circle", "random"], default=DEFAULT_MOTION)
+    parser.add_argument("--save-video", action="store_true")
+    parser.add_argument("--no-vis", action="store_true")
+    parser.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT)
 
-    # NEW FLAG: enable Safe‑APF vortex rotation
+    # NEW
+    parser.add_argument("--num-agents", type=int, default=1,
+                        help="Number of Crazyflies (agents) to simulate.")
+
     parser.add_argument("--safe-apf", action="store_true",
-                        help="Enable Safe-APF vortex field. If not set, uses regular APF.")
+                        help="Enable Safe-APF vortex field.")
 
     return parser.parse_args()
 
@@ -416,17 +419,39 @@ def wall_polygon(wall):
     local_corners = np.array([[-hx, -hy], [hx, -hy], [hx, hy], [-hx, hy], [-hx, -hy]])
     return np.array([wall_world_point(corner, wall) for corner in local_corners])
 
+def apf_gradient(p, theta, moving_spheres, params, safe_apf=True, other_agents=None):
+    """
+    APF / Safe‑APF gradient for a single agent at position p.
 
-def apf_gradient(p, theta, moving_spheres, params, safe_apf=True):
-    zeta = params["zeta"]
-    eta = params["eta"]
-    dstar = params["dstar"]
-    Qstar = params["Qstar"]
-    dsafe = params["dsafe"]
-    dvort = params["dvort"]
+    Components:
+    - Attractive potential to goal
+    - Repulsive potential from static + moving obstacles
+    - Safe‑APF vortex rotation (if safe_apf=True)
+    - Swarm repulsion (too close)
+    - Swarm attraction (too far)
+    """
+
+    # -----------------------------
+    # Unpack parameters
+    # -----------------------------
+    zeta     = params["zeta"]
+    eta      = params["eta"]
+    dstar    = params["dstar"]
+    Qstar    = params["Qstar"]
+    dsafe    = params["dsafe"]
+    dvort    = params["dvort"]
     alpha_th = params["alpha_th"]
 
-    # Attractive potential
+    # Swarm parameters
+    d_min       = params.get("swarm_d_min", 0.5)   # desired minimum spacing
+    d_max       = params.get("swarm_d_max", 1.5)   # desired maximum spacing
+    rep_gain    = params.get("swarm_rep_gain", 2.0)
+    att_gain    = params.get("swarm_att_gain", 0.2)
+    max_norm    = params.get("max_grad_norm", 3.0)
+
+    # -----------------------------
+    # Attractive potential to goal
+    # -----------------------------
     diff_goal = p - GOAL
     d_goal = np.linalg.norm(diff_goal)
     if d_goal <= dstar:
@@ -437,7 +462,7 @@ def apf_gradient(p, theta, moving_spheres, params, safe_apf=True):
     grad_rep_total = np.zeros(2)
 
     # -----------------------------
-    # SPHERES
+    # SPHERES (static + moving)
     # -----------------------------
     for sphere in [*STATIC_SPHERE_OBSTACLES, *moving_spheres]:
         nearest = sphere_nearest_point(p, sphere)
@@ -447,7 +472,6 @@ def apf_gradient(p, theta, moving_spheres, params, safe_apf=True):
 
         grad_rep = sphere_repulsion_2d(p, sphere, eta, Qstar)
 
-        # Regular APF (no vortex)
         if not safe_apf:
             grad_rep_total += grad_rep
             continue
@@ -477,12 +501,10 @@ def apf_gradient(p, theta, moving_spheres, params, safe_apf=True):
 
         grad_rep = wall_repulsion_2d(p, wall, eta, Qstar)
 
-        # Regular APF
         if not safe_apf:
             grad_rep_total += grad_rep
             continue
 
-        # Safe‑APF vortex
         alpha = wrap(theta - np.arctan2(nearest[1] - p[1], nearest[0] - p[0]))
         direction_sign = 1 if abs(alpha) <= alpha_th else -1
 
@@ -496,8 +518,15 @@ def apf_gradient(p, theta, moving_spheres, params, safe_apf=True):
         gamma = np.pi * direction_sign * drel
         grad_rep_total += rotmat(gamma) @ grad_rep
 
-    return grad_att + grad_rep_total
+    # -----------------------------
+    # Final gradient + clipping
+    # -----------------------------
+    grad = grad_att + grad_rep_total
+    norm_grad = np.linalg.norm(grad)
+    if norm_grad > max_norm:
+        grad = grad * (max_norm / (norm_grad + 1e-9))
 
+    return grad
 
 def rollout_preview(start, theta, moving_spheres, params, safe_apf=True,
                     steps=PREVIEW_STEPS, step_gain=STEP_GAIN):
@@ -594,7 +623,8 @@ def main():
 
     args = parse_args()
     title_tokens = [tok for tok in sys.argv[1:] if tok not in {"--save-video", "--no-vis"}]
-    plot_title = f"safeapf.py {' '.join(shlex.quote(tok) for tok in title_tokens)}".strip() 
+    plot_title = f"safeapf.py {' '.join(shlex.quote(tok) for tok in title_tokens)}".strip()
+
     map_xml = args.map_xml.resolve()
     if not map_xml.exists():
         raise FileNotFoundError(f"Map XML not found: {map_xml}")
@@ -602,102 +632,154 @@ def main():
         raise ValueError("--moving-spheres must be non-negative.")
     if args.timeout <= 0.0:
         raise ValueError("--timeout must be positive.")
+
+    # Load map
     WORLD_MIN, WORLD_MAX, GOAL, STATIC_BOX_OBSTACLES, STATIC_SPHERE_OBSTACLES = parse_map(map_xml)
+
+    # Build moving obstacles
     moving_spheres = build_moving_sphere_specs(args.moving_spheres, args.motion)
     runtime_xml, temp_xml = create_runtime_map(map_xml, moving_spheres)
-    sim = Sim(control=Control.state, xml_path=runtime_xml, device="cpu")
+
+    # Initialize simulator
+    sim = Sim(control=Control.state,
+          xml_path=runtime_xml,
+          device="cpu",
+          n_drones=args.num_agents)
+
     use_box_collision(sim, enable=True)
     sim.reset()
+
+    # Multi-agent support
+    N = sim.n_drones
 
     mocap_ids = get_mocap_ids(sim, moving_spheres)
     sync_moving_spheres_to_sim(sim, moving_spheres, mocap_ids)
 
-    params = dict(zeta=1.1547, eta=0.09, dstar=0.3, Qstar=0.6, dsafe=0.15, dvort=0.4, alpha_th=np.deg2rad(12))
+    # APF + swarm parameters
+    params = dict(
+    zeta=1.0, eta=0.15, dstar=0.3, Qstar=0.7,
+    dsafe=0.18, dvort=0.45, alpha_th=np.deg2rad(12),
+    max_grad_norm=3.0,
+    )
 
     fps = CAPTURE_FPS
     sim_steps = int(args.timeout * CTRL_FREQ)
-    traj = []
+
+    traj = [[] for _ in range(N)]  # trajectory per agent
     obstacle_traces = [[] for _ in moving_spheres]
-    cmd = np.zeros((sim.n_worlds, sim.n_drones, 13))
-    start_pos = np.array(sim.data.states.pos[0, 0, :2])
+
+    cmd = np.zeros((sim.n_worlds, N, 13))
+    start_positions = [np.array(sim.data.states.pos[0, i, :2]) for i in range(N)]
+
     video_frames = []
     output_stem = None
     show_window = not args.no_vis
 
-    print(f"Running Safe-APF with map {map_xml.name}...")
+    print(f"Running Safe-APF with map {map_xml.name} for {N} agents...")
 
     try:
         for step in range(sim_steps):
             t = step / CTRL_FREQ
+
+            # Update moving obstacles
             update_obstacles(moving_spheres, t, 1.0 / CTRL_FREQ)
             sync_moving_spheres_to_sim(sim, moving_spheres, mocap_ids)
 
-            states = sim.data.states
-            pos = states.pos[0, 0]
-            p = np.array([pos[0], pos[1]])
-            theta = quat_to_yaw(states.quat[0, 0])
+            # Collect all agent positions
+            all_positions = [np.array(sim.data.states.pos[0, i, :2]) for i in range(N)]
+            all_yaws = [quat_to_yaw(sim.data.states.quat[0, i]) for i in range(N)]
 
-            traj.append(p.copy())
-            for idx, obstacle in enumerate(moving_spheres):
-                obstacle_traces[idx].append(obstacle.center.copy())
+            # Log trajectories
+            for i in range(N):
+                traj[i].append(all_positions[i].copy())
+            for idx, obs in enumerate(moving_spheres):
+                obstacle_traces[idx].append(obs.center.copy())
 
-            if np.linalg.norm(p - GOAL) < GOAL_TOL:
-                print("Reached goal.")
-                break
+            # Compute APF for each agent
+            for i in range(N):
+                p_i = all_positions[i]
+                theta_i = all_yaws[i]
 
-            g = apf_gradient(p, theta, moving_spheres, params, safe_apf=args.safe_apf)
-            direction = -g
-            norm_dir = np.linalg.norm(direction)
-            if norm_dir > 1e-6:
-                direction /= norm_dir
-            else:
-                direction = np.zeros(2)
+                g = apf_gradient(
+                    p_i, theta_i,
+                    moving_spheres,
+                    params,
+                    safe_apf=args.safe_apf
+                )
 
-            p_des = p + STEP_GAIN * direction
-            p_des[0] = np.clip(p_des[0], WORLD_MIN[0] + 0.01, WORLD_MAX[0] - 0.01)
-            p_des[1] = np.clip(p_des[1], WORLD_MIN[1] + 0.01, WORLD_MAX[1] - 0.01)
+                direction = -g
+                norm_dir = np.linalg.norm(direction)
+                if norm_dir > 1e-6:
+                    direction /= norm_dir
+                else:
+                    direction = np.zeros(2)
 
-            cmd[..., 0] = p_des[0]
-            cmd[..., 1] = p_des[1]
-            cmd[..., 2] = Z_REF
-            cmd[..., 3] = YAW_REF
-            cmd[..., 6] = 0.0
+                # Desired next position
+                p_des = p_i + STEP_GAIN * direction
+                p_des[0] = np.clip(p_des[0], WORLD_MIN[0] + 0.01, WORLD_MAX[0] - 0.01)
+                p_des[1] = np.clip(p_des[1], WORLD_MIN[1] + 0.01, WORLD_MAX[1] - 0.01)
 
+                # Fill command
+                cmd[..., i, 0] = p_des[0]
+                cmd[..., i, 1] = p_des[1]
+                cmd[..., i, 2] = Z_REF
+                cmd[..., i, 3] = YAW_REF
+                cmd[..., i, 6] = 0.0
+
+            # Step simulation
             sim.state_control(cmd)
             sim.step(sim.freq // sim.control_freq)
 
+            # Rendering + preview
             if (show_window or args.save_video) and (step * fps) % sim.control_freq < fps:
-                preview_path = rollout_preview(p, theta, moving_spheres, params, safe_apf=args.safe_apf)
+                # Draw preview paths for ALL agents
+                preview_paths = []
+                for i in range(N):
+                    preview_paths.append(
+                        rollout_preview(
+                            all_positions[i],
+                            all_yaws[i],
+                            moving_spheres,
+                            params,
+                            safe_apf=args.safe_apf
+                        )
+                    )
+
                 if show_window:
-                    # Draw overlays onto the currently active (window) viewer.
-                    draw_scene(sim, preview_path, start_pos)
-                    sim.render(camera=CAPTURE_CAMERA, cam_config=FREE_CAM, width=CAPTURE_WIDTH, height=CAPTURE_HEIGHT)
+                    for i in range(N):
+                        draw_scene(sim, preview_paths[i], start_positions[i])
+                    sim.render(camera=CAPTURE_CAMERA, cam_config=FREE_CAM,
+                            width=CAPTURE_WIDTH, height=CAPTURE_HEIGHT)
 
                 if args.save_video:
-                    # Offscreen and window viewers keep separate marker buffers.
-                    # Prime/select the rgb viewer, then redraw overlays for capture.
-                    sim.render(mode="rgb_array", camera=CAPTURE_CAMERA, cam_config=FREE_CAM, width=CAPTURE_WIDTH, height=CAPTURE_HEIGHT)
-                    draw_scene(sim, preview_path, start_pos)
-                    frame = sim.render(mode="rgb_array", camera=CAPTURE_CAMERA, cam_config=FREE_CAM, width=CAPTURE_WIDTH, height=CAPTURE_HEIGHT)
+                    sim.render(mode="rgb_array", camera=CAPTURE_CAMERA, cam_config=FREE_CAM,
+                            width=CAPTURE_WIDTH, height=CAPTURE_HEIGHT)
+                    for i in range(N):
+                        draw_scene(sim, preview_paths[i], start_positions[i])
+                    frame = sim.render(mode="rgb_array", camera=CAPTURE_CAMERA, cam_config=FREE_CAM,
+                                    width=CAPTURE_WIDTH, height=CAPTURE_HEIGHT)
                     if frame is not None:
                         video_frames.append(frame)
+
         else:
             print("Time limit reached.")
+
     finally:
         if args.save_video and video_frames:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             CAPTURE_DIR.mkdir(parents=True, exist_ok=True)
-            map_str = str(args.map_xml)
-            map_str = map_str.replace(".", "")
-            output_stem = CAPTURE_DIR / f"safeapf_{map_str}_NumMovObs-{args.moving_spheres}_{args.motion}_{timestamp}"
+            map_str = str(args.map_xml).replace(".", "")
+            output_stem = CAPTURE_DIR / f"safeapf_{map_str}_NumAgents-{N}_{timestamp}"
             output_path = output_stem.with_suffix(".mp4")
             iio.imwrite(output_path, video_frames, fps=CAPTURE_FPS)
             print(f"Saved capture to {output_path}")
+
         print_free_cam(sim)
         sim.close()
         if temp_xml is not None:
             temp_xml.unlink(missing_ok=True)
 
+    # Plot trajectories of all agents
     plot_path = output_stem.with_suffix(".png") if output_stem is not None else None
     plot_results(traj, obstacle_traces, moving_spheres, plot_path=plot_path, title=plot_title)
 

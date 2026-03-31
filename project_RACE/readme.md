@@ -9,7 +9,8 @@
       cd crazyflow
       ```
 
-   2. ```pixi shell -e gpu``` or `pixi shell` if you don't have an Nvidia GPU
+   2. `pixi shell` if you don't have an Nvidia GPU
+   2b. ```pixi shell -e gpu``` if you want GPU then `pip install -e ".[gpu]"`
 
    3. `python examples/hover.py` from inside `crazyflow` directory to confirm install
 
