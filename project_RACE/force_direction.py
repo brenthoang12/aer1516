@@ -98,10 +98,8 @@ def plan_path(max_iters: int = 3000) -> np.ndarray:
 def draw_force_field(sim: Sim, drone_pos: np.ndarray, grid_n: int = 7):
     """Draw APF total-force arrows on a 2D grid slice at the drone's current height.
 
-    Each arrow is rendered as a short line (tail → tip) plus a small dot at the
-    tip so it reads as directional even without a dedicated arrowhead primitive.
-    All arrows have the same fixed length (ARROW_LEN) so you compare *direction*
-    rather than magnitude; colour encodes relative magnitude instead:
+    Directional arrows with a tail and a spherical tip.
+    All arrows have the same fixed length, colour encodes relative magnitude:
         blue  → weak field     yellow → strong field
     """
     ARROW_LEN = 0.13   # visual length of every arrow (metres)
@@ -133,13 +131,12 @@ def draw_force_field(sim: Sim, drone_pos: np.ndarray, grid_n: int = 7):
 
 
 def draw_drone_forces(sim: Sim, drone_pos: np.ndarray):
-    """Draw the three APF force components at the drone's live position.
+    """Draws three APF force components at the drone's live position.
 
-    ● Green  — attractive force  (pulls toward goal)
-    ● Red    — total repulsive force  (walls + obstacles combined)
-    ● White  — resultant / net force
-    All arrows are direction-normalised and scaled to SCALE metres so they
-    remain legible regardless of the raw force magnitude.
+    Green  — attractive force  (pulls toward goal)
+    Red    — total repulsive force  (walls + obstacles combined)
+    White  — resultant / net force
+  
     """
     SCALE = 0.30   # visual length (metres)
     WIDTH = 2.5    # line width in pixels
@@ -165,7 +162,8 @@ def draw_drone_forces(sim: Sim, drone_pos: np.ndarray):
 
 
 # ---------------------------------------------------------------------------
-# Scene helper  (now accepts drone_pos for the force visualisations)
+# Visualization helpers (must be called every frame before sim.render())
+# Includes force field and drone force arrow visualizations
 # ---------------------------------------------------------------------------
 
 def draw_scene(sim: Sim, path: np.ndarray, drone_pos: np.ndarray):
