@@ -18,7 +18,7 @@ from crazyflow.sim.sim import use_box_collision
 from crazyflow.sim.visualize import draw_line, draw_points
 
 
-PREVIEW_STEPS = 12
+PREVIEW_STEPS = 100
 CTRL_FREQ = 100
 Z_REF = 0.5
 YAW_REF = 0.0
@@ -705,12 +705,16 @@ def main():
             else:
                 direction = np.zeros(2)
 
-            step = STEP_GAIN * (FINAL_APPROACH_ZETA_SCALE if final_approach else 1.0)
-            if final_approach:
-                step = min(step, d_goal)  # ease in: never step past the goal
-            p_des = p + step * direction
-            p_des[0] = np.clip(p_des[0], WORLD_MIN[0] + 0.01, WORLD_MAX[0] - 0.01)
-            p_des[1] = np.clip(p_des[1], WORLD_MIN[1] + 0.01, WORLD_MAX[1] - 0.01)
+            if d_goal < STEP_GAIN:
+                # Close enough to snap: command goal directly, no overshoot
+                p_des = np.array([GOAL[0], GOAL[1]])
+            else:
+                step = STEP_GAIN * (FINAL_APPROACH_ZETA_SCALE if final_approach else 1.0)
+                if final_approach:
+                    step = min(step, d_goal)  # ease in: never step past the goal
+                p_des = p + step * direction
+                p_des[0] = np.clip(p_des[0], WORLD_MIN[0] + 0.01, WORLD_MAX[0] - 0.01)
+                p_des[1] = np.clip(p_des[1], WORLD_MIN[1] + 0.01, WORLD_MAX[1] - 0.01)
 
             cmd[..., 0] = p_des[0]
             cmd[..., 1] = p_des[1]
