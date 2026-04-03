@@ -529,7 +529,100 @@ def rollout_preview(start, theta, moving_spheres, params, safe_apf=True,
     return np.array(path)
 
 
-def draw_scene(sim, preview_path, start_pos):
+# Force Field Vectors + Drone Vectors 
+def draw_force_field(sim, drone_pos_2d, theta, moving_spheres, params, drone_z=None, grid_n=20):
+    """Draw APF total-force arrows on a 2D grid at the drone's current Z height.
+    Color for force magnitude: blue → weak field, yellow → strong field.
+    """
+    ARROW_LEN = 0.13   # visual length of every arrow (metres)
+    ARROW_W   = 1.2    # line width in pixels
+    TIP_R     = 0.012  # tip sphere radius (metres)
+
+    z = float(drone_z) if drone_z is not None else Z_REF
+
+    xs = np.linspace(WORLD_MIN[0] + 0.15, WORLD_MAX[0] - 0.15, grid_n)
+    ys = np.linspace(WORLD_MIN[1] + 0.15, WORLD_MAX[1] - 0.15, grid_n)
+
+    for x in xs:
+        for y in ys:
+            p = np.array([x, y])
+            g = apf_gradient(p, theta, moving_spheres, params)
+            direction = -g
+            norm = np.linalg.norm(direction)
+            if norm < 1e-6:
+                continue
+            direction /= norm
+
+            tail = np.array([x, y, z])
+            tip  = np.array([x + direction[0] * ARROW_LEN,
+                             y + direction[1] * ARROW_LEN,
+                             z])
+
+            # Colour: blue (weak) → yellow (strong)
+            intensity = float(np.clip(np.linalg.norm(g) / (params["zeta"] * 3), 0.0, 1.0))
+            rgba = np.array([intensity, 0.6 + 0.4 * intensity, 1.0 - intensity, 0.75])
+
+            draw_line(sim, np.array([tail, tip]),
+                      rgba=rgba, start_size=ARROW_W, end_size=ARROW_W)
+            draw_points(sim, tip[None], rgba=rgba, size=TIP_R)
+
+
+def draw_drone_forces(sim, drone_pos_2d, theta, moving_spheres, params):
+    """Draw the three APF force components anchored at the drone's live position.
+
+    ● Green  — attractive force  (pulls toward goal)
+    ● Red    — total repulsive force  (spheres + walls combined)
+    ● White  — resultant / net force
+    All arrows are direction-normalised and scaled to SCALE metres.
+    """
+    SCALE = 0.30   # visual length (metres)
+    WIDTH = 2.5    # line width in pixels
+    TIP_R = 0.020  # tip sphere radius (metres)
+
+    zeta  = params["zeta"]
+    dstar = params["dstar"]
+    eta   = params["eta"]
+    Qstar = params["Qstar"]
+
+    p = drone_pos_2d
+
+    # Attractive gradient 
+    diff_goal = p - GOAL
+    d_goal = np.linalg.norm(diff_goal)
+    grad_att = zeta * diff_goal if d_goal <= dstar else zeta * dstar * diff_goal / (d_goal + 1e-9)
+
+    # Total repulsive gradient (spheres + walls)
+    grad_rep = np.zeros(2)
+    for sphere in [*STATIC_SPHERE_OBSTACLES, *moving_spheres]:
+        grad_rep += sphere_repulsion_2d(p, sphere, eta, Qstar)
+    for wall in STATIC_BOX_OBSTACLES:
+        grad_rep += wall_repulsion_2d(p, wall, eta, Qstar)
+
+    grad_total = grad_att + grad_rep
+
+    origin = np.array([p[0], p[1], Z_REF])
+    vectors = [
+        (-grad_att,   np.array([0.15, 1.00, 0.25, 1.0])),   # green  – attractive
+        (-grad_rep,   np.array([1.00, 0.20, 0.15, 1.0])),   # red    – repulsive
+        (-grad_total, np.array([1.00, 1.00, 1.00, 1.0])),   # white  – resultant
+    ]
+    for force_2d, rgba in vectors:
+        norm = np.linalg.norm(force_2d)
+        if norm < 1e-6:
+            continue
+        direction = force_2d / norm
+        tip = np.array([origin[0] + direction[0] * SCALE,
+                        origin[1] + direction[1] * SCALE,
+                        Z_REF])
+        draw_line(sim, np.array([origin, tip]),
+                  rgba=rgba, start_size=WIDTH, end_size=WIDTH)
+        draw_points(sim, tip[None], rgba=rgba, size=TIP_R)
+
+# Added draw_force_field and draw_drone_forces functions
+# Added additional arguments to draw_scene
+
+
+def draw_scene(sim, preview_path, start_pos, drone_pos_2d, drone_z, theta, moving_spheres, params):
     if len(preview_path) >= 2:
         draw_line(
             sim,
@@ -542,6 +635,11 @@ def draw_scene(sim, preview_path, start_pos):
     draw_points(sim, np.array([[GOAL[0], GOAL[1], Z_REF]]), rgba=np.array([0.0, 1.0, 0.2, 1.0]), size=0.08)
     draw_points(sim, np.array([[start_pos[0], start_pos[1], Z_REF]]), rgba=np.array([1.0, 1.0, 1.0, 0.8]), size=0.05)
 
+    # Grid of APF arrows
+    draw_force_field(sim, drone_pos_2d, theta, moving_spheres, params, drone_z=drone_z)
+
+    # Force arrows on drone itself
+    draw_drone_forces(sim, drone_pos_2d, theta, moving_spheres, params)
 
 def plot_results(traj, obstacle_traces, moving_spheres, plot_path=None, title=None):
     import matplotlib.pyplot as plt
@@ -635,6 +733,8 @@ def main():
             states = sim.data.states
             pos = states.pos[0, 0]
             p = np.array([pos[0], pos[1]])
+            # Added drone z-component
+            drone_z = float(pos[2])
             theta = quat_to_yaw(states.quat[0, 0])
 
             traj.append(p.copy())
@@ -670,14 +770,16 @@ def main():
                 preview_path = rollout_preview(p, theta, moving_spheres, params, safe_apf=args.safe_apf)
                 if show_window:
                     # Draw overlays onto the currently active (window) viewer.
-                    draw_scene(sim, preview_path, start_pos)
+                    # Added arguments to draw_scene function call
+                    draw_scene(sim, preview_path, start_pos, p, drone_z, theta, moving_spheres, params)
                     sim.render(camera=CAPTURE_CAMERA, cam_config=FREE_CAM, width=CAPTURE_WIDTH, height=CAPTURE_HEIGHT)
 
                 if args.save_video:
                     # Offscreen and window viewers keep separate marker buffers.
                     # Prime/select the rgb viewer, then redraw overlays for capture.
-                    sim.render(mode="rgb_array", camera=CAPTURE_CAMERA, cam_config=FREE_CAM, width=CAPTURE_WIDTH, height=CAPTURE_HEIGHT)
-                    draw_scene(sim, preview_path, start_pos)
+                    # Added arguments to draw_scene function call
+                    # Removed sim.render line as it removed arrows
+                    draw_scene(sim, preview_path, start_pos, p, drone_z, theta, moving_spheres, params)
                     frame = sim.render(mode="rgb_array", camera=CAPTURE_CAMERA, cam_config=FREE_CAM, width=CAPTURE_WIDTH, height=CAPTURE_HEIGHT)
                     if frame is not None:
                         video_frames.append(frame)
