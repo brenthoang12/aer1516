@@ -20,7 +20,7 @@ from gymnasium.envs.mujoco.mujoco_rendering import MujocoRenderer
 from crazyflow.control import Control
 from crazyflow.sim import Sim
 from crazyflow.sim.sim import use_box_collision
-from crazyflow.sim.visualize import draw_line, draw_points
+from crazyflow.sim.visualize import draw_arrow, draw_line, draw_points
 
 
 PREVIEW_STEPS = 12
@@ -49,7 +49,7 @@ DEFAULT_MOTION = "circle"
 DEFAULT_SPHERE_RADIUS = 0.25
 DEFAULT_SPHERE_RGBA = (1.0, 0.0, 0.0, 1.0)
 DEFAULT_BOUNDARY_RGBA = (0.5, 0.7, 0.9, 0.12)
-DRONE_SAFETY_RADIUS = 0.08
+DRONE_SAFETY_RADIUS = 0.05
 OBSTACLE_BODY_MASS = 0.15
 OBSTACLE_POS_KP = 10.0
 OBSTACLE_VEL_KD = 6.0
@@ -57,6 +57,7 @@ OBSTACLE_MAX_FORCE = 1.5
 ARROW_REFRESH_PERIOD = 4
 FIELD_SAMPLE_SNAP = 0.08
 MOVING_SAMPLE_SNAP = 0.10
+ARROW_RENDER_STYLE = "line"  # "cone" or "line"
 
 GOAL = np.array([3.0, 3.0])
 WORLD_MIN = np.array([0.0, 0.0, 0.0])
@@ -714,7 +715,8 @@ def enforce_drone_clearance(sim, moving_spheres, drone_idx=0):
         return
 
     pos_array = sim.data.states.pos.at[0, drone_idx, :2].set(jnp.array(projected_xy))
-    vel_array = sim.data.states.vel.at[0, drone_idx, :2].set(jnp.zeros(2))
+    current_xy_vel = np.array(sim.data.states.vel[0, drone_idx, :2], dtype=float)
+    vel_array = sim.data.states.vel.at[0, drone_idx, :2].set(jnp.array(-current_xy_vel))
     sim.data = sim.data.replace(states=sim.data.states.replace(pos=pos_array, vel=vel_array))
 
 
@@ -778,8 +780,10 @@ def apf_gradient(p, theta, moving_spheres, params, safe_apf=True):
 
         grad_rep = wall_repulsion_2d(p, wall, eta, Qstar)
 
-        # Regular APF
-        if not safe_apf:
+        # Keep the named environment boundary walls as pure push-away barriers
+        # even in Safe-APF mode. Interior box obstacles can still use vortex
+        # flow to encourage navigation around them.
+        if (not safe_apf) or str(wall.get("name", "")).startswith("wall_"):
             grad_rep_total += grad_rep
             continue
 
@@ -846,9 +850,9 @@ def build_local_field_samples(drone_pos_2d, moving_spheres):
     sample_keys = set()
     drone_anchor = quantize_xy(drone_pos_2d, FIELD_SAMPLE_SNAP)
     windows = [
-        (0.45, 9),   # dense near the drone
-        (0.80, 5),   # medium ring
-        (1.05, 3),   # sparse outer ring
+        (0.26, 11),  # very dense near the drone
+        (0.48, 7),   # medium ring
+        (0.68, 5),   # sparse outer ring
     ]
     previous_radius = -np.inf
     boundary_margin = 0.12
@@ -877,8 +881,8 @@ def build_local_field_samples(drone_pos_2d, moving_spheres):
 
     # Add small dense patches around nearby obstacle boundaries so the field is
     # more informative where the APF changes quickly.
-    focus_radius = 1.00
-    patch_offsets = np.array([-0.12, 0.0, 0.12])
+    focus_radius = 0.82
+    patch_offsets = np.array([-0.09, -0.045, 0.0, 0.045, 0.09])
     for sphere in [*STATIC_SPHERE_OBSTACLES, *moving_spheres]:
         anchor = quantize_xy(sphere_nearest_point(drone_pos_2d, sphere), FIELD_SAMPLE_SNAP)
         if np.linalg.norm(anchor - drone_pos_2d) > focus_radius:
@@ -923,9 +927,9 @@ def force_field_rgba(force_norm, params):
 
 
 def build_force_field_arrows(drone_pos_2d, theta, moving_spheres, params, drone_z=None, safe_apf=True, overlay_cache=None):
-    ARROW_LEN = 0.075
-    ARROW_W = 0.65
-    TIP_R = 0.005
+    ARROW_LEN = 0.05
+    ARROW_W = 0.40
+    TIP_R = 0.0035
     z = float(drone_z) if drone_z is not None else Z_REF
     arrows = []
 
@@ -1001,8 +1005,16 @@ def draw_arrow_primitives(sim, arrows):
     if sim.viewer is None:
         return
     for arrow in arrows:
-        draw_line(sim, np.array([arrow.tail, arrow.tip]), rgba=arrow.rgba, start_size=arrow.width, end_size=arrow.width)
-        draw_points(sim, arrow.tip[None], rgba=arrow.rgba, size=arrow.tip_radius)
+        if ARROW_RENDER_STYLE == "line":
+            draw_line(
+                sim,
+                np.array([arrow.tail, arrow.tip]),
+                rgba=arrow.rgba,
+                start_size=arrow.width,
+                end_size=arrow.width,
+            )
+        else:
+            draw_arrow(sim, arrow.tail, arrow.tip, radius=arrow.tip_radius, rgba=arrow.rgba)
 
 
 def refresh_force_overlay_cache(overlay_cache, drone_pos_2d, theta, moving_spheres, params, drone_z=None, safe_apf=True):
@@ -1171,7 +1183,7 @@ def main():
     mujoco.mj_forward(sim.mj_model, sim.mj_data)
     refresh_moving_spheres_from_mj_data(sim, moving_spheres, obstacle_handles)
 
-    params = dict(zeta=1.1547, eta=0.09, dstar=0.3, Qstar=0.6, dsafe=0.15, dvort=0.4, alpha_th=np.deg2rad(12))
+    params = dict(zeta=0.8, eta=0.09, dstar=0.3, Qstar=0.6, dsafe=0.15, dvort=0.4, alpha_th=np.deg2rad(12))
 
     fps = CAPTURE_FPS
     sim_steps = int(args.timeout * CTRL_FREQ)
