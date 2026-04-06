@@ -123,6 +123,7 @@ def parse_args():
     parser.add_argument("--motion", choices=["static", "circle", "random"], default=DEFAULT_MOTION, help="Motion model used for all moving spheres.")
     parser.add_argument("--save-video", action="store_true", help="Save an MP4 capture of the simulation.")
     parser.add_argument("--no-vis", action="store_true", help="Disable live rendering and the final matplotlib plot.")
+    parser.add_argument("--draw_arrows", action="store_true", help="Draw the APF force-field and drone-force arrows.")
     parser.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT, help="Simulation timeout in seconds.")
 
     # NEW FLAG: enable Safe‑APF vortex rotation
@@ -622,7 +623,7 @@ def draw_drone_forces(sim, drone_pos_2d, theta, moving_spheres, params):
 # Added additional arguments to draw_scene
 
 
-def draw_scene(sim, preview_path, start_pos, drone_pos_2d, drone_z, theta, moving_spheres, params):
+def draw_scene(sim, preview_path, start_pos, drone_pos_2d, drone_z, theta, moving_spheres, params, draw_arrows=False):
     if len(preview_path) >= 2:
         draw_line(
             sim,
@@ -635,11 +636,9 @@ def draw_scene(sim, preview_path, start_pos, drone_pos_2d, drone_z, theta, movin
     draw_points(sim, np.array([[GOAL[0], GOAL[1], Z_REF]]), rgba=np.array([0.0, 1.0, 0.2, 1.0]), size=0.08)
     draw_points(sim, np.array([[start_pos[0], start_pos[1], Z_REF]]), rgba=np.array([1.0, 1.0, 1.0, 0.8]), size=0.05)
 
-    # Grid of APF arrows
-    draw_force_field(sim, drone_pos_2d, theta, moving_spheres, params, drone_z=drone_z)
-
-    # Force arrows on drone itself
-    draw_drone_forces(sim, drone_pos_2d, theta, moving_spheres, params)
+    if draw_arrows:
+        draw_force_field(sim, drone_pos_2d, theta, moving_spheres, params, drone_z=drone_z)
+        draw_drone_forces(sim, drone_pos_2d, theta, moving_spheres, params)
 
 def plot_results(traj, obstacle_traces, moving_spheres, plot_path=None, title=None):
     import matplotlib.pyplot as plt
@@ -771,7 +770,7 @@ def main():
                 if show_window:
                     # Draw overlays onto the currently active (window) viewer.
                     # Added arguments to draw_scene function call
-                    draw_scene(sim, preview_path, start_pos, p, drone_z, theta, moving_spheres, params)
+                    draw_scene(sim, preview_path, start_pos, p, drone_z, theta, moving_spheres, params, draw_arrows=args.draw_arrows)
                     sim.render(camera=CAPTURE_CAMERA, cam_config=FREE_CAM, width=CAPTURE_WIDTH, height=CAPTURE_HEIGHT)
 
                 if args.save_video:
@@ -779,7 +778,7 @@ def main():
                     # Prime/select the rgb viewer, then redraw overlays for capture.
                     # Added arguments to draw_scene function call
                     # Removed sim.render line as it removed arrows
-                    draw_scene(sim, preview_path, start_pos, p, drone_z, theta, moving_spheres, params)
+                    draw_scene(sim, preview_path, start_pos, p, drone_z, theta, moving_spheres, params, draw_arrows=args.draw_arrows)
                     frame = sim.render(mode="rgb_array", camera=CAPTURE_CAMERA, cam_config=FREE_CAM, width=CAPTURE_WIDTH, height=CAPTURE_HEIGHT)
                     if frame is not None:
                         video_frames.append(frame)
