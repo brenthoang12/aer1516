@@ -54,6 +54,9 @@ OBSTACLE_BODY_MASS = 0.15
 OBSTACLE_POS_KP = 10.0
 OBSTACLE_VEL_KD = 6.0
 OBSTACLE_MAX_FORCE = 1.5
+ARROW_REFRESH_PERIOD = 4
+FIELD_SAMPLE_SNAP = 0.08
+MOVING_SAMPLE_SNAP = 0.10
 
 GOAL = np.array([3.0, 3.0])
 WORLD_MIN = np.array([0.0, 0.0, 0.0])
@@ -74,6 +77,25 @@ class BodyHandle:
     qvel_adr: int
     qvel_dim: int
     mass: float
+
+
+@dataclass(frozen=True)
+class ArrowPrimitive:
+    tail: np.ndarray
+    tip: np.ndarray
+    rgba: np.ndarray
+    width: float
+    tip_radius: float
+
+
+@dataclass
+class ForceOverlayCache:
+    render_counter: int = 0
+    last_refresh_counter: int = -ARROW_REFRESH_PERIOD
+    sample_key: tuple | None = None
+    sample_points: list[np.ndarray] = field(default_factory=list)
+    field_arrows: list[ArrowPrimitive] = field(default_factory=list)
+    drone_force_arrows: list[ArrowPrimitive] = field(default_factory=list)
 
 
 @dataclass
@@ -805,49 +827,132 @@ def rollout_preview(start, theta, moving_spheres, params, safe_apf=True,
     return np.array(path)
 
 
-# Force Field Vectors + Drone Vectors 
-def draw_force_field(sim, drone_pos_2d, theta, moving_spheres, params, drone_z=None, grid_n=20):
-    """Draw APF total-force arrows on a 2D grid at the drone's current Z height.
-    Color for force magnitude: blue → weak field, yellow → strong field.
-    """
-    ARROW_LEN = 0.13   # visual length of every arrow (metres)
-    ARROW_W   = 1.2    # line width in pixels
-    TIP_R     = 0.012  # tip sphere radius (metres)
+def quantize_xy(point, step):
+    return np.round(np.array(point, dtype=float) / step) * step
 
+
+def make_local_field_sample_key(drone_pos_2d, moving_spheres, focus_radius=1.45):
+    drone_anchor = tuple(np.round(np.array(drone_pos_2d) / FIELD_SAMPLE_SNAP).astype(int))
+    nearby_spheres = []
+    for idx, sphere in enumerate(moving_spheres):
+        if np.linalg.norm(sphere.center - drone_pos_2d) <= focus_radius + sphere.radius:
+            sphere_anchor = tuple(np.round(sphere.center / MOVING_SAMPLE_SNAP).astype(int))
+            nearby_spheres.append((idx, *sphere_anchor))
+    return (drone_anchor, tuple(nearby_spheres))
+
+
+def build_local_field_samples(drone_pos_2d, moving_spheres):
+    samples = []
+    sample_keys = set()
+    drone_anchor = quantize_xy(drone_pos_2d, FIELD_SAMPLE_SNAP)
+    windows = [
+        (0.45, 9),   # dense near the drone
+        (0.80, 5),   # medium ring
+        (1.05, 3),   # sparse outer ring
+    ]
+    previous_radius = -np.inf
+    boundary_margin = 0.12
+
+    def maybe_add_sample(p):
+        if not (WORLD_MIN[0] + boundary_margin <= p[0] <= WORLD_MAX[0] - boundary_margin):
+            return
+        if not (WORLD_MIN[1] + boundary_margin <= p[1] <= WORLD_MAX[1] - boundary_margin):
+            return
+        key = tuple(np.round(p, 3))
+        if key in sample_keys:
+            return
+        sample_keys.add(key)
+        samples.append(np.array(p, dtype=float))
+
+    for radius, grid_n in windows:
+        xs = np.linspace(drone_anchor[0] - radius, drone_anchor[0] + radius, grid_n)
+        ys = np.linspace(drone_anchor[1] - radius, drone_anchor[1] + radius, grid_n)
+        for x in xs:
+            for y in ys:
+                cheb_dist = max(abs(x - drone_anchor[0]), abs(y - drone_anchor[1]))
+                if cheb_dist <= previous_radius + 1e-9:
+                    continue
+                maybe_add_sample((x, y))
+        previous_radius = radius
+
+    # Add small dense patches around nearby obstacle boundaries so the field is
+    # more informative where the APF changes quickly.
+    focus_radius = 1.00
+    patch_offsets = np.array([-0.12, 0.0, 0.12])
+    for sphere in [*STATIC_SPHERE_OBSTACLES, *moving_spheres]:
+        anchor = quantize_xy(sphere_nearest_point(drone_pos_2d, sphere), FIELD_SAMPLE_SNAP)
+        if np.linalg.norm(anchor - drone_pos_2d) > focus_radius:
+            continue
+        for dx in patch_offsets:
+            for dy in patch_offsets:
+                maybe_add_sample(anchor + np.array([dx, dy]))
+
+    for wall in STATIC_BOX_OBSTACLES:
+        anchor = quantize_xy(wall_nearest_point(drone_pos_2d, wall), FIELD_SAMPLE_SNAP)
+        if np.linalg.norm(anchor - drone_pos_2d) > focus_radius:
+            continue
+        tangent = rotmat(np.deg2rad(wall["angle_deg"])) @ np.array([1.0, 0.0])
+        normal = rotmat(np.deg2rad(wall["angle_deg"])) @ np.array([0.0, 1.0])
+        for dt in patch_offsets:
+            for dn in patch_offsets:
+                maybe_add_sample(anchor + 0.9 * dt * tangent + 0.45 * dn * normal)
+
+    return samples
+
+
+def get_local_field_samples(drone_pos_2d, moving_spheres, overlay_cache=None):
+    if overlay_cache is None:
+        return build_local_field_samples(drone_pos_2d, moving_spheres)
+
+    sample_key = make_local_field_sample_key(drone_pos_2d, moving_spheres)
+    if overlay_cache.sample_key != sample_key or not overlay_cache.sample_points:
+        overlay_cache.sample_key = sample_key
+        overlay_cache.sample_points = build_local_field_samples(drone_pos_2d, moving_spheres)
+    return overlay_cache.sample_points
+
+
+def force_field_rgba(force_norm, params):
+    scale = params["zeta"] * 3.0
+    intensity = float(np.clip(np.log1p(force_norm) / np.log1p(scale), 0.0, 1.0))
+    return np.array([
+        0.15 + 0.85 * intensity,
+        0.35 + 0.45 * intensity,
+        1.00 - 0.85 * intensity,
+        0.30 + 0.40 * intensity,
+    ])
+
+
+def build_force_field_arrows(drone_pos_2d, theta, moving_spheres, params, drone_z=None, safe_apf=True, overlay_cache=None):
+    ARROW_LEN = 0.075
+    ARROW_W = 0.65
+    TIP_R = 0.005
     z = float(drone_z) if drone_z is not None else Z_REF
+    arrows = []
 
-    xs = np.linspace(WORLD_MIN[0] + 0.15, WORLD_MAX[0] - 0.15, grid_n)
-    ys = np.linspace(WORLD_MIN[1] + 0.15, WORLD_MAX[1] - 0.15, grid_n)
+    for p in get_local_field_samples(drone_pos_2d, moving_spheres, overlay_cache=overlay_cache):
+        g = apf_gradient(p, theta, moving_spheres, params, safe_apf=safe_apf)
+        force_norm = np.linalg.norm(g)
+        if force_norm < 1e-6:
+            continue
 
-    for x in xs:
-        for y in ys:
-            p = np.array([x, y])
-            g = apf_gradient(p, theta, moving_spheres, params)
-            direction = -g
-            norm = np.linalg.norm(direction)
-            if norm < 1e-6:
-                continue
-            direction /= norm
+        direction = -g / force_norm
+        tail = np.array([p[0], p[1], z])
+        tip = np.array([
+            p[0] + direction[0] * ARROW_LEN,
+            p[1] + direction[1] * ARROW_LEN,
+            z,
+        ])
+        rgba = force_field_rgba(force_norm, params)
+        arrows.append(ArrowPrimitive(tail=tail, tip=tip, rgba=rgba, width=ARROW_W, tip_radius=TIP_R))
 
-            tail = np.array([x, y, z])
-            tip  = np.array([x + direction[0] * ARROW_LEN,
-                             y + direction[1] * ARROW_LEN,
-                             z])
-
-            # Colour: blue (weak) → yellow (strong)
-            intensity = float(np.clip(np.linalg.norm(g) / (params["zeta"] * 3), 0.0, 1.0))
-            rgba = np.array([intensity, 0.6 + 0.4 * intensity, 1.0 - intensity, 0.75])
-
-            draw_line(sim, np.array([tail, tip]),
-                      rgba=rgba, start_size=ARROW_W, end_size=ARROW_W)
-            draw_points(sim, tip[None], rgba=rgba, size=TIP_R)
+    return arrows
 
 
-def draw_drone_forces(sim, drone_pos_2d, theta, moving_spheres, params):
+def build_drone_force_arrows(drone_pos_2d, theta, moving_spheres, params, safe_apf=True):
     """Draw the three APF force components anchored at the drone's live position.
 
     ● Green  — attractive force  (pulls toward goal)
-    ● Red    — total repulsive force  (spheres + walls combined)
+    ● Red    — total repulsive contribution
     ● White  — resultant / net force
     All arrows are direction-normalised and scaled to SCALE metres.
     """
@@ -867,14 +972,10 @@ def draw_drone_forces(sim, drone_pos_2d, theta, moving_spheres, params):
     d_goal = np.linalg.norm(diff_goal)
     grad_att = zeta * diff_goal if d_goal <= dstar else zeta * dstar * diff_goal / (d_goal + 1e-9)
 
-    # Total repulsive gradient (spheres + walls)
-    grad_rep = np.zeros(2)
-    for sphere in [*STATIC_SPHERE_OBSTACLES, *moving_spheres]:
-        grad_rep += sphere_repulsion_2d(p, sphere, eta, Qstar)
-    for wall in STATIC_BOX_OBSTACLES:
-        grad_rep += wall_repulsion_2d(p, wall, eta, Qstar)
-
-    grad_total = grad_att + grad_rep
+    # Match the controller: the total field comes from apf_gradient, and the
+    # displayed repulsive contribution is the remainder after subtracting attraction.
+    grad_total = apf_gradient(p, theta, moving_spheres, params, safe_apf=safe_apf)
+    grad_rep = grad_total - grad_att
 
     origin = np.array([p[0], p[1], Z_REF])
     vectors = [
@@ -882,6 +983,7 @@ def draw_drone_forces(sim, drone_pos_2d, theta, moving_spheres, params):
         (-grad_rep,   np.array([1.00, 0.20, 0.15, 1.0])),   # red    – repulsive
         (-grad_total, np.array([1.00, 1.00, 1.00, 1.0])),   # white  – resultant
     ]
+    arrows = []
     for force_2d, rgba in vectors:
         norm = np.linalg.norm(force_2d)
         if norm < 1e-6:
@@ -890,16 +992,97 @@ def draw_drone_forces(sim, drone_pos_2d, theta, moving_spheres, params):
         tip = np.array([origin[0] + direction[0] * SCALE,
                         origin[1] + direction[1] * SCALE,
                         Z_REF])
-        draw_line(sim, np.array([origin, tip]),
-                  rgba=rgba, start_size=WIDTH, end_size=WIDTH)
-        draw_points(sim, tip[None], rgba=rgba, size=TIP_R)
+        arrows.append(ArrowPrimitive(tail=origin.copy(), tip=tip, rgba=rgba, width=WIDTH, tip_radius=TIP_R))
+
+    return arrows
+
+
+def draw_arrow_primitives(sim, arrows):
+    if sim.viewer is None:
+        return
+    for arrow in arrows:
+        draw_line(sim, np.array([arrow.tail, arrow.tip]), rgba=arrow.rgba, start_size=arrow.width, end_size=arrow.width)
+        draw_points(sim, arrow.tip[None], rgba=arrow.rgba, size=arrow.tip_radius)
+
+
+def refresh_force_overlay_cache(overlay_cache, drone_pos_2d, theta, moving_spheres, params, drone_z=None, safe_apf=True):
+    if overlay_cache is None:
+        return
+
+    refresh_needed = not overlay_cache.field_arrows
+    refresh_needed = refresh_needed or (overlay_cache.render_counter - overlay_cache.last_refresh_counter >= ARROW_REFRESH_PERIOD)
+    if not refresh_needed:
+        return
+
+    overlay_cache.field_arrows = build_force_field_arrows(
+        drone_pos_2d,
+        theta,
+        moving_spheres,
+        params,
+        drone_z=drone_z,
+        safe_apf=safe_apf,
+        overlay_cache=overlay_cache,
+    )
+    overlay_cache.drone_force_arrows = build_drone_force_arrows(
+        drone_pos_2d,
+        theta,
+        moving_spheres,
+        params,
+        safe_apf=safe_apf,
+    )
+    overlay_cache.last_refresh_counter = overlay_cache.render_counter
+
+
+def draw_force_field(sim, drone_pos_2d, theta, moving_spheres, params, drone_z=None, safe_apf=True, overlay_cache=None):
+    """Draw a local adaptive vector-field diagnostic around the drone."""
+    if overlay_cache is None:
+        arrows = build_force_field_arrows(
+            drone_pos_2d,
+            theta,
+            moving_spheres,
+            params,
+            drone_z=drone_z,
+            safe_apf=safe_apf,
+            overlay_cache=None,
+        )
+        draw_arrow_primitives(sim, arrows)
+        return
+
+    refresh_force_overlay_cache(
+        overlay_cache,
+        drone_pos_2d,
+        theta,
+        moving_spheres,
+        params,
+        drone_z=drone_z,
+        safe_apf=safe_apf,
+    )
+    draw_arrow_primitives(sim, overlay_cache.field_arrows)
+
+
+def draw_drone_forces(sim, drone_pos_2d, theta, moving_spheres, params, safe_apf=True, overlay_cache=None):
+    if overlay_cache is None:
+        arrows = build_drone_force_arrows(drone_pos_2d, theta, moving_spheres, params, safe_apf=safe_apf)
+        draw_arrow_primitives(sim, arrows)
+        return
+
+    refresh_force_overlay_cache(
+        overlay_cache,
+        drone_pos_2d,
+        theta,
+        moving_spheres,
+        params,
+        drone_z=Z_REF,
+        safe_apf=safe_apf,
+    )
+    draw_arrow_primitives(sim, overlay_cache.drone_force_arrows)
 
 # Added draw_force_field and draw_drone_forces functions
 # Added additional arguments to draw_scene
 
 
-def draw_scene(sim, preview_path, start_pos, drone_pos_2d, drone_z, theta, moving_spheres, params, draw_arrows=False):
-    if len(preview_path) >= 2:
+def draw_scene(sim, preview_path, start_pos, drone_pos_2d, drone_z, theta, moving_spheres, params, draw_arrows=False, safe_apf=True, overlay_cache=None):
+    if (not draw_arrows) and len(preview_path) >= 2:
         draw_line(
             sim,
             np.column_stack([preview_path, np.full(len(preview_path), Z_REF)]),
@@ -912,8 +1095,8 @@ def draw_scene(sim, preview_path, start_pos, drone_pos_2d, drone_z, theta, movin
     draw_points(sim, np.array([[start_pos[0], start_pos[1], Z_REF]]), rgba=np.array([1.0, 1.0, 1.0, 0.8]), size=0.05)
 
     if draw_arrows:
-        draw_force_field(sim, drone_pos_2d, theta, moving_spheres, params, drone_z=drone_z)
-        draw_drone_forces(sim, drone_pos_2d, theta, moving_spheres, params)
+        draw_force_field(sim, drone_pos_2d, theta, moving_spheres, params, drone_z=drone_z, safe_apf=safe_apf, overlay_cache=overlay_cache)
+        # draw_drone_forces(sim, drone_pos_2d, theta, moving_spheres, params, safe_apf=safe_apf, overlay_cache=overlay_cache)
 
 def plot_results(traj, obstacle_traces, moving_spheres, plot_path=None, title=None):
     import matplotlib.pyplot as plt
@@ -999,6 +1182,7 @@ def main():
     video_frames = []
     output_stem = None
     show_window = not args.no_vis
+    overlay_cache = ForceOverlayCache()
 
     print(f"Running Safe-APF with map {map_xml.name} on {sim_device}...")
 
@@ -1047,15 +1231,19 @@ def main():
 
             if (show_window or args.save_video) and (step * fps) % sim.control_freq < fps:
                 sync_drones_to_mj_data(sim, drone_handles)
-                preview_path = rollout_preview(p, theta, moving_spheres, params, safe_apf=args.safe_apf)
+                if args.draw_arrows:
+                    overlay_cache.render_counter += 1
+                preview_path = np.empty((0, 2)) if args.draw_arrows else rollout_preview(
+                    p, theta, moving_spheres, params, safe_apf=args.safe_apf
+                )
                 if show_window:
                     ensure_render_target(sim, mode="human", camera=CAPTURE_CAMERA, cam_config=FREE_CAM, width=CAPTURE_WIDTH, height=CAPTURE_HEIGHT)
-                    draw_scene(sim, preview_path, start_pos, p, drone_z, theta, moving_spheres, params, draw_arrows=args.draw_arrows)
+                    draw_scene(sim, preview_path, start_pos, p, drone_z, theta, moving_spheres, params, draw_arrows=args.draw_arrows, safe_apf=args.safe_apf, overlay_cache=overlay_cache)
                     render_live_scene(sim, mode="human", camera=CAPTURE_CAMERA, cam_config=FREE_CAM, width=CAPTURE_WIDTH, height=CAPTURE_HEIGHT)
 
                 if args.save_video:
                     ensure_render_target(sim, mode="rgb_array", camera=CAPTURE_CAMERA, cam_config=FREE_CAM, width=CAPTURE_WIDTH, height=CAPTURE_HEIGHT)
-                    draw_scene(sim, preview_path, start_pos, p, drone_z, theta, moving_spheres, params, draw_arrows=args.draw_arrows)
+                    draw_scene(sim, preview_path, start_pos, p, drone_z, theta, moving_spheres, params, draw_arrows=args.draw_arrows, safe_apf=args.safe_apf, overlay_cache=overlay_cache)
                     frame = render_live_scene(sim, mode="rgb_array", camera=CAPTURE_CAMERA, cam_config=FREE_CAM, width=CAPTURE_WIDTH, height=CAPTURE_HEIGHT)
                     if frame is not None:
                         video_frames.append(frame)
