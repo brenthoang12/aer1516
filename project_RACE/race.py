@@ -58,7 +58,7 @@ OBSTACLE_MAX_FORCE = 1.5  # Maximum planar control force applied to moving rigid
 ARROW_REFRESH_PERIOD = 4  # Render-frame interval between arrow overlay refreshes.
 FIELD_SAMPLE_SNAP = 0.08  # Spatial quantization used for local field-sample caching.
 MOVING_SAMPLE_SNAP = 0.10  # Spatial quantization used for moving-obstacle cache keys.
-ARROW_RENDER_STYLE = "cone"  # Force-field glyph style: "cone" or "line".
+ARROW_RENDER_STYLE = "line"  # Force-field glyph style: "cone" or "line".
 
 GOAL = np.array([3.0, 3.0])  # Goal position in the xy plane; overwritten from the loaded map.
 WORLD_MIN = np.array([0.0, 0.0, 0.0])  # World lower bounds; overwritten from the loaded map.
