@@ -59,7 +59,7 @@ OBSTACLE_MAX_FORCE = 1.5
 ARROW_REFRESH_PERIOD = 4
 FIELD_SAMPLE_SNAP = 0.08
 MOVING_SAMPLE_SNAP = 0.10
-ARROW_RENDER_STYLE = "cone"  # "cone" or "line"
+ARROW_RENDER_STYLE = "line"  # "cone" or "line"
 
 GOAL = np.array([3.0, 3.0])
 WORLD_MIN = np.array([0.0, 0.0, 0.0])
