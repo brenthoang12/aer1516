@@ -1,16 +1,21 @@
 import argparse
 from dataclasses import dataclass, field
 from datetime import datetime
+import os
 from pathlib import Path
 import shlex
 import sys
 import tempfile
 import xml.etree.ElementTree as ET
 
+os.environ.setdefault("SCIPY_ARRAY_API", "1")
+
 import imageio.v3 as iio
+import jax
 import jax.numpy as jnp
 import mujoco
 import numpy as np
+from gymnasium.envs.mujoco.mujoco_rendering import MujocoRenderer
 
 from crazyflow.control import Control
 from crazyflow.sim import Sim
@@ -43,13 +48,30 @@ DEFAULT_MOVING_SPHERES = 0
 DEFAULT_MOTION = "circle"
 DEFAULT_SPHERE_RADIUS = 0.25
 DEFAULT_SPHERE_RGBA = (1.0, 0.0, 0.0, 1.0)
-IDENTITY_QUAT = jnp.array([1.0, 0.0, 0.0, 0.0])
+OBSTACLE_BODY_MASS = 0.15
+OBSTACLE_POS_KP = 10.0
+OBSTACLE_VEL_KD = 6.0
+OBSTACLE_MAX_FORCE = 1.5
 
 GOAL = np.array([3.0, 3.0])
 WORLD_MIN = np.array([0.0, 0.0, 0.0])
 WORLD_MAX = np.array([6.0, 7.0, 3.0])
 STATIC_BOX_OBSTACLES = []
 STATIC_SPHERE_OBSTACLES = []
+
+
+def select_sim_device() -> str:
+    return "gpu" if any(device.platform == "gpu" for device in jax.devices()) else "cpu"
+
+
+@dataclass(frozen=True)
+class BodyHandle:
+    body_id: int
+    qpos_adr: int
+    qpos_dim: int
+    qvel_adr: int
+    qvel_dim: int
+    mass: float
 
 
 @dataclass
@@ -68,11 +90,13 @@ class MovingSphere:
     max_speed: float = 0.3
     turn_interval: float = 1.5
     seed: int | None = None
+    base_center: np.ndarray | None = None
     _rng: np.random.Generator = field(init=False, repr=False)
     _time_to_turn: float = field(init=False, repr=False, default=0.0)
 
     def __post_init__(self):
         self.center = np.array(self.center, dtype=float)
+        self.base_center = np.array(self.base_center if self.base_center is not None else self.center, dtype=float)
         self.anchor = np.array(self.anchor if self.anchor is not None else self.center, dtype=float)
         self.velocity = np.array(self.velocity if self.velocity is not None else np.zeros(2), dtype=float)
         self._rng = np.random.default_rng(self.seed)
@@ -90,8 +114,6 @@ class MovingSphere:
 
     def update(self, t: float, dt: float):
         if self.motion == "circle":
-            theta = self.phase + self.angular_speed * t
-            self.center = self.anchor + self.orbit_radius * np.array([np.cos(theta), np.sin(theta)])
             return
 
         if self.motion == "random":
@@ -99,21 +121,27 @@ class MovingSphere:
             if self._time_to_turn <= 0.0:
                 self.velocity = self._random_velocity()
                 self._time_to_turn = self.turn_interval
-
-            self.center = self.center + self.velocity * dt
-            for axis in range(2):
-                lower = WORLD_MIN[axis] + self.radius
-                upper = WORLD_MAX[axis] - self.radius
-                if self.center[axis] < lower:
-                    self.center[axis] = lower
-                    self.velocity[axis] *= -1.0
-                elif self.center[axis] > upper:
-                    self.center[axis] = upper
-                    self.velocity[axis] *= -1.0
             return
 
         if self.motion != "static":
             raise ValueError(f"Unsupported obstacle motion: {self.motion}")
+
+    def target_position(self, t: float) -> np.ndarray:
+        if self.motion == "circle":
+            theta = self.phase + self.angular_speed * t
+            return self.anchor + self.orbit_radius * np.array([np.cos(theta), np.sin(theta)])
+        if self.motion == "static":
+            return self.anchor.copy()
+        return self.center.copy()
+
+    def target_velocity(self, t: float) -> np.ndarray:
+        if self.motion == "circle":
+            theta = self.phase + self.angular_speed * t
+            tangential = np.array([-np.sin(theta), np.cos(theta)])
+            return self.orbit_radius * self.angular_speed * tangential
+        if self.motion == "random":
+            return self.velocity.copy()
+        return np.zeros(2)
 
 
 def parse_args():
@@ -257,8 +285,29 @@ def create_runtime_map(map_xml: Path, moving_spheres):
             "body",
             {
                 "name": obstacle.name,
-                "mocap": "true",
                 "pos": f"{obstacle.center[0]:g} {obstacle.center[1]:g} {obstacle.z:g}",
+            },
+        )
+        ET.SubElement(
+            body,
+            "joint",
+            {
+                "name": f"{obstacle.name}_x",
+                "type": "slide",
+                "axis": "1 0 0",
+                "damping": "0.8",
+                "limited": "false",
+            },
+        )
+        ET.SubElement(
+            body,
+            "joint",
+            {
+                "name": f"{obstacle.name}_y",
+                "type": "slide",
+                "axis": "0 1 0",
+                "damping": "0.8",
+                "limited": "false",
             },
         )
         ET.SubElement(
@@ -270,7 +319,8 @@ def create_runtime_map(map_xml: Path, moving_spheres):
                 "rgba": " ".join(f"{v:g}" for v in obstacle.rgba),
                 "contype": "1",
                 "conaffinity": "1",
-                "density": "1000",
+                "mass": f"{OBSTACLE_BODY_MASS:g}",
+                "friction": "0.8 0.05 0.05",
             },
         )
 
@@ -286,30 +336,166 @@ def update_obstacles(obstacles, t, dt):
         obstacle.update(t, dt)
 
 
-def sync_moving_spheres_to_sim(sim, moving_spheres, mocap_ids):
+def joint_dims(joint_type: int) -> tuple[int, int]:
+    if joint_type == mujoco.mjtJoint.mjJNT_FREE:
+        return 7, 6
+    if joint_type == mujoco.mjtJoint.mjJNT_BALL:
+        return 4, 3
+    if joint_type in (mujoco.mjtJoint.mjJNT_SLIDE, mujoco.mjtJoint.mjJNT_HINGE):
+        return 1, 1
+    raise ValueError(f"Unsupported MuJoCo joint type: {joint_type}")
+
+
+def get_body_handle(sim, body_name: str) -> BodyHandle:
+    body_id = mujoco.mj_name2id(sim.mj_model, mujoco.mjtObj.mjOBJ_BODY, body_name)
+    if body_id < 0:
+        raise ValueError(f"Body {body_name!r} not found in MuJoCo model.")
+
+    joint_start = int(sim.mj_model.body_jntadr[body_id])
+    joint_count = int(sim.mj_model.body_jntnum[body_id])
+    if joint_count <= 0:
+        raise ValueError(f"Body {body_name!r} has no joints.")
+
+    qpos_adr = int(sim.mj_model.jnt_qposadr[joint_start])
+    qvel_adr = int(sim.mj_model.jnt_dofadr[joint_start])
+    qpos_dim = 0
+    qvel_dim = 0
+    for joint_id in range(joint_start, joint_start + joint_count):
+        add_qpos, add_qvel = joint_dims(int(sim.mj_model.jnt_type[joint_id]))
+        qpos_dim += add_qpos
+        qvel_dim += add_qvel
+
+    return BodyHandle(
+        body_id=body_id,
+        qpos_adr=qpos_adr,
+        qpos_dim=qpos_dim,
+        qvel_adr=qvel_adr,
+        qvel_dim=qvel_dim,
+        mass=float(sim.mj_model.body_mass[body_id]),
+    )
+
+
+def get_drone_handles(sim):
+    return [get_body_handle(sim, f"drone:{idx}") for idx in range(sim.n_drones)]
+
+
+def get_obstacle_handles(sim, moving_spheres):
+    return {obstacle.name: get_body_handle(sim, obstacle.name) for obstacle in moving_spheres}
+
+
+def sync_drones_to_mj_data(sim, drone_handles):
+    if sim.n_worlds != 1:
+        raise ValueError("race.py rigid-body obstacle sync currently supports n_worlds=1 only.")
+
+    for drone_idx, handle in enumerate(drone_handles):
+        pos = np.array(sim.data.states.pos[0, drone_idx], dtype=float)
+        quat = np.roll(np.array(sim.data.states.quat[0, drone_idx], dtype=float), 1)
+        vel = np.array(sim.data.states.vel[0, drone_idx], dtype=float)
+        ang_vel = np.array(sim.data.states.ang_vel[0, drone_idx], dtype=float)
+
+        sim.mj_data.qpos[handle.qpos_adr : handle.qpos_adr + handle.qpos_dim] = np.concatenate([pos, quat])
+        sim.mj_data.qvel[handle.qvel_adr : handle.qvel_adr + handle.qvel_dim] = np.concatenate([vel, ang_vel])
+
+
+def enforce_world_bounds(sim, obstacle, handle):
+    qpos = sim.mj_data.qpos[handle.qpos_adr : handle.qpos_adr + 2].copy()
+    qvel = sim.mj_data.qvel[handle.qvel_adr : handle.qvel_adr + 2].copy()
+    world_pos = obstacle.base_center + qpos
+
+    for axis in range(2):
+        lower = WORLD_MIN[axis] + obstacle.radius
+        upper = WORLD_MAX[axis] - obstacle.radius
+        if world_pos[axis] < lower:
+            world_pos[axis] = lower
+            qpos[axis] = lower - obstacle.base_center[axis]
+            qvel[axis] = abs(qvel[axis])
+            if obstacle.motion == "random":
+                obstacle.velocity[axis] = abs(obstacle.velocity[axis])
+        elif world_pos[axis] > upper:
+            world_pos[axis] = upper
+            qpos[axis] = upper - obstacle.base_center[axis]
+            qvel[axis] = -abs(qvel[axis])
+            if obstacle.motion == "random":
+                obstacle.velocity[axis] = -abs(obstacle.velocity[axis])
+
+    sim.mj_data.qpos[handle.qpos_adr : handle.qpos_adr + 2] = qpos
+    sim.mj_data.qvel[handle.qvel_adr : handle.qvel_adr + 2] = qvel
+
+
+def step_rigid_body_obstacles(sim, moving_spheres, obstacle_handles, drone_handles, t, dt):
     if not moving_spheres:
         return
 
-    mocap_pos = sim.mjx_data.mocap_pos
-    mocap_quat = sim.mjx_data.mocap_quat
-    for obstacle, mocap_id in zip(moving_spheres, mocap_ids):
-        pos = jnp.array([obstacle.center[0], obstacle.center[1], obstacle.z])
-        mocap_pos = mocap_pos.at[0, mocap_id].set(pos)
-        mocap_quat = mocap_quat.at[0, mocap_id].set(IDENTITY_QUAT)
-    sim.mjx_data = sim.mjx_data.replace(mocap_pos=mocap_pos, mocap_quat=mocap_quat)
+    substeps = max(1, sim.freq // CTRL_FREQ)
+    sync_drones_to_mj_data(sim, drone_handles)
+    sim.mj_data.qfrc_applied[:] = 0.0
 
-
-def get_mocap_ids(sim, moving_spheres):
-    mocap_ids = []
+    target_t = t + dt
     for obstacle in moving_spheres:
-        body_id = mujoco.mj_name2id(sim.mj_model, mujoco.mjtObj.mjOBJ_BODY, obstacle.name)
-        if body_id < 0:
-            raise ValueError(f"Moving sphere body {obstacle.name!r} not found in MuJoCo model.")
-        mocap_id = sim.mj_model.body_mocapid[body_id]
-        if mocap_id < 0:
-            raise ValueError(f"Body {obstacle.name!r} is not a mocap body.")
-        mocap_ids.append(int(mocap_id))
-    return mocap_ids
+        handle = obstacle_handles[obstacle.name]
+        current_offset = sim.mj_data.qpos[handle.qpos_adr : handle.qpos_adr + 2]
+        current_pos = obstacle.base_center + current_offset
+        current_vel = sim.mj_data.qvel[handle.qvel_adr : handle.qvel_adr + 2]
+        target_pos = obstacle.target_position(target_t)
+        target_vel = obstacle.target_velocity(target_t)
+
+        pos_err = target_pos - current_pos
+        vel_err = target_vel - current_vel
+        force = handle.mass * (OBSTACLE_POS_KP * pos_err + OBSTACLE_VEL_KD * vel_err)
+        force = np.clip(force, -OBSTACLE_MAX_FORCE, OBSTACLE_MAX_FORCE)
+        sim.mj_data.qfrc_applied[handle.qvel_adr : handle.qvel_adr + 2] = force
+
+    mujoco.mj_step(sim.mj_model, sim.mj_data, nstep=substeps)
+    for obstacle in moving_spheres:
+        enforce_world_bounds(sim, obstacle, obstacle_handles[obstacle.name])
+    mujoco.mj_forward(sim.mj_model, sim.mj_data)
+
+    sim.mj_data.qfrc_applied[:] = 0.0
+
+
+def refresh_moving_spheres_from_mj_data(sim, moving_spheres, obstacle_handles):
+    for obstacle in moving_spheres:
+        handle = obstacle_handles[obstacle.name]
+        body_pos = np.array(sim.mj_data.xpos[handle.body_id], dtype=float)
+        obstacle.center = body_pos[:2]
+
+
+def ensure_render_target(sim, mode="human", camera=-1, cam_config=None, width=1920, height=1080):
+    if sim.viewer is None:
+        if isinstance(camera, str):
+            cam_id = mujoco.mj_name2id(sim.mj_model, mujoco.mjtObj.mjOBJ_CAMERA, camera)
+            assert cam_id > -1, f"Camera name '{camera}' not found in the model."
+        elif isinstance(camera, int):
+            cam_id = camera
+            assert cam_id >= -1, f"camera id must be >=-1, was {cam_id}"
+        else:
+            raise TypeError("camera argument must be integer or string")
+
+        sim.mj_model.vis.global_.offwidth = width
+        sim.mj_model.vis.global_.offheight = height
+        sim.viewer = MujocoRenderer(
+            sim.mj_model,
+            sim.mj_data,
+            max_geom=sim.max_visual_geom,
+            default_cam_config=cam_config,
+            height=height,
+            width=width,
+            camera_id=cam_id,
+        )
+    else:
+        cam_id = sim.viewer.camera_id if isinstance(camera, int) else camera
+
+    viewer = sim.viewer._get_viewer(mode)
+    if mode == "human" and isinstance(camera, int) and camera > -1:
+        viewer.cam.fixedcamid = camera
+        viewer.cam.type = mujoco.mjtCamera.mjCAMERA_FIXED
+    return viewer
+
+
+def render_live_scene(sim, mode="human", camera=-1, cam_config=None, width=1920, height=1080):
+    ensure_render_target(sim, mode=mode, camera=camera, cam_config=cam_config, width=width, height=height)
+    mujoco.mj_forward(sim.mj_model, sim.mj_data)
+    return sim.viewer.render(mode)
 
 
 def print_free_cam(sim):
@@ -702,12 +888,16 @@ def main():
     WORLD_MIN, WORLD_MAX, GOAL, STATIC_BOX_OBSTACLES, STATIC_SPHERE_OBSTACLES = parse_map(map_xml)
     moving_spheres = build_moving_sphere_specs(args.moving_spheres, args.motion)
     runtime_xml, temp_xml = create_runtime_map(map_xml, moving_spheres)
-    sim = Sim(control=Control.state, xml_path=runtime_xml, device="cpu")
+    sim_device = select_sim_device()
+    sim = Sim(control=Control.state, xml_path=runtime_xml, device=sim_device)
     use_box_collision(sim, enable=True)
     sim.reset()
 
-    mocap_ids = get_mocap_ids(sim, moving_spheres)
-    sync_moving_spheres_to_sim(sim, moving_spheres, mocap_ids)
+    drone_handles = get_drone_handles(sim)
+    obstacle_handles = get_obstacle_handles(sim, moving_spheres)
+    sync_drones_to_mj_data(sim, drone_handles)
+    mujoco.mj_forward(sim.mj_model, sim.mj_data)
+    refresh_moving_spheres_from_mj_data(sim, moving_spheres, obstacle_handles)
 
     params = dict(zeta=1.1547, eta=0.09, dstar=0.3, Qstar=0.6, dsafe=0.15, dvort=0.4, alpha_th=np.deg2rad(12))
 
@@ -721,13 +911,14 @@ def main():
     output_stem = None
     show_window = not args.no_vis
 
-    print(f"Running Safe-APF with map {map_xml.name}...")
+    print(f"Running Safe-APF with map {map_xml.name} on {sim_device}...")
 
     try:
         for step in range(sim_steps):
             t = step / CTRL_FREQ
             update_obstacles(moving_spheres, t, 1.0 / CTRL_FREQ)
-            sync_moving_spheres_to_sim(sim, moving_spheres, mocap_ids)
+            step_rigid_body_obstacles(sim, moving_spheres, obstacle_handles, drone_handles, t, 1.0 / CTRL_FREQ)
+            refresh_moving_spheres_from_mj_data(sim, moving_spheres, obstacle_handles)
 
             states = sim.data.states
             pos = states.pos[0, 0]
@@ -766,20 +957,17 @@ def main():
             sim.step(sim.freq // sim.control_freq)
 
             if (show_window or args.save_video) and (step * fps) % sim.control_freq < fps:
+                sync_drones_to_mj_data(sim, drone_handles)
                 preview_path = rollout_preview(p, theta, moving_spheres, params, safe_apf=args.safe_apf)
                 if show_window:
-                    # Draw overlays onto the currently active (window) viewer.
-                    # Added arguments to draw_scene function call
+                    ensure_render_target(sim, mode="human", camera=CAPTURE_CAMERA, cam_config=FREE_CAM, width=CAPTURE_WIDTH, height=CAPTURE_HEIGHT)
                     draw_scene(sim, preview_path, start_pos, p, drone_z, theta, moving_spheres, params, draw_arrows=args.draw_arrows)
-                    sim.render(camera=CAPTURE_CAMERA, cam_config=FREE_CAM, width=CAPTURE_WIDTH, height=CAPTURE_HEIGHT)
+                    render_live_scene(sim, mode="human", camera=CAPTURE_CAMERA, cam_config=FREE_CAM, width=CAPTURE_WIDTH, height=CAPTURE_HEIGHT)
 
                 if args.save_video:
-                    # Offscreen and window viewers keep separate marker buffers.
-                    # Prime/select the rgb viewer, then redraw overlays for capture.
-                    # Added arguments to draw_scene function call
-                    # Removed sim.render line as it removed arrows
+                    ensure_render_target(sim, mode="rgb_array", camera=CAPTURE_CAMERA, cam_config=FREE_CAM, width=CAPTURE_WIDTH, height=CAPTURE_HEIGHT)
                     draw_scene(sim, preview_path, start_pos, p, drone_z, theta, moving_spheres, params, draw_arrows=args.draw_arrows)
-                    frame = sim.render(mode="rgb_array", camera=CAPTURE_CAMERA, cam_config=FREE_CAM, width=CAPTURE_WIDTH, height=CAPTURE_HEIGHT)
+                    frame = render_live_scene(sim, mode="rgb_array", camera=CAPTURE_CAMERA, cam_config=FREE_CAM, width=CAPTURE_WIDTH, height=CAPTURE_HEIGHT)
                     if frame is not None:
                         video_frames.append(frame)
         else:
