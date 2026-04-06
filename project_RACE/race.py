@@ -28,6 +28,7 @@ CTRL_FREQ = 100
 Z_REF = 0.5
 YAW_REF = 0.0
 STEP_GAIN = 0.05
+MAX_APF_STEP = 0.08
 GOAL_TOL = 0.05
 
 FREE_CAM = {
@@ -49,6 +50,7 @@ DEFAULT_MOTION = "circle"
 DEFAULT_SPHERE_RADIUS = 0.25
 DEFAULT_SPHERE_RGBA = (1.0, 0.0, 0.0, 1.0)
 DEFAULT_BOUNDARY_RGBA = (0.5, 0.7, 0.9, 0.12)
+# Effective drone radius used to inflate obstacles/walls in the repulsive APF.
 DRONE_SAFETY_RADIUS = 0.05
 OBSTACLE_BODY_MASS = 0.15
 OBSTACLE_POS_KP = 10.0
@@ -57,7 +59,7 @@ OBSTACLE_MAX_FORCE = 1.5
 ARROW_REFRESH_PERIOD = 4
 FIELD_SAMPLE_SNAP = 0.08
 MOVING_SAMPLE_SNAP = 0.10
-ARROW_RENDER_STYLE = "line"  # "cone" or "line"
+ARROW_RENDER_STYLE = "cone"  # "cone" or "line"
 
 GOAL = np.array([3.0, 3.0])
 WORLD_MIN = np.array([0.0, 0.0, 0.0])
@@ -804,6 +806,21 @@ def apf_gradient(p, theta, moving_spheres, params, safe_apf=True):
     return grad_att + grad_rep_total
 
 
+def apf_step_delta(grad, step_gain=STEP_GAIN, max_step=MAX_APF_STEP):
+    """Convert APF gradient into a bounded position step without normalizing it.
+
+    This preserves force magnitude information while still capping the commanded
+    step for stability near strong repulsive fields.
+    """
+    delta = -step_gain * np.array(grad, dtype=float)
+    delta_norm = np.linalg.norm(delta)
+    if delta_norm < 1e-9:
+        return np.zeros(2)
+    if delta_norm > max_step:
+        delta *= max_step / delta_norm
+    return delta
+
+
 def rollout_preview(start, theta, moving_spheres, params, safe_apf=True,
                     steps=PREVIEW_STEPS, step_gain=STEP_GAIN):
     path = [start.copy()]
@@ -815,16 +832,13 @@ def rollout_preview(start, theta, moving_spheres, params, safe_apf=True,
             break
 
         # Mirror the actual control loop: use the current drone yaw for Safe-APF,
-        # then step along the normalized descent direction and project to free space.
+        # then step using the capped APF magnitude and project to free space.
         g = apf_gradient(p, preview_theta, moving_spheres, params, safe_apf=safe_apf)
-
-        direction = -g
-        norm_dir = np.linalg.norm(direction)
-        if norm_dir < 1e-6:
+        delta = apf_step_delta(g, step_gain=step_gain)
+        if np.linalg.norm(delta) < 1e-9:
             break
 
-        direction /= norm_dir
-        p = p + step_gain * direction
+        p = p + delta
         p = project_point_to_free_space(p, moving_spheres)
         path.append(p.copy())
 
@@ -1183,7 +1197,15 @@ def main():
     mujoco.mj_forward(sim.mj_model, sim.mj_data)
     refresh_moving_spheres_from_mj_data(sim, moving_spheres, obstacle_handles)
 
-    params = dict(zeta=0.8, eta=0.09, dstar=0.3, Qstar=0.6, dsafe=0.15, dvort=0.4, alpha_th=np.deg2rad(12))
+    params = dict(
+        zeta=2.0,                 # Attractive gain toward the goal.
+        eta=0.09,                  # Repulsive gain for walls and obstacles.
+        dstar=0.1,                # Goal distance where attraction saturates.
+        Qstar=0.1,                # Obstacle influence distance for repulsion.
+        dsafe=0.05,               # Inner Safe-APF radius where vortexing is disabled.
+        dvort=0.4,                # Outer Safe-APF radius where vortexing fades out.
+        alpha_th=np.deg2rad(12),  # Heading threshold used to choose vortex direction.
+    )
 
     fps = CAPTURE_FPS
     sim_steps = int(args.timeout * CTRL_FREQ)
@@ -1221,14 +1243,7 @@ def main():
                 break
 
             g = apf_gradient(p, theta, moving_spheres, params, safe_apf=args.safe_apf)
-            direction = -g
-            norm_dir = np.linalg.norm(direction)
-            if norm_dir > 1e-6:
-                direction /= norm_dir
-            else:
-                direction = np.zeros(2)
-
-            p_des = p + STEP_GAIN * direction
+            p_des = p + apf_step_delta(g)
             p_des = project_point_to_free_space(p_des, moving_spheres)
 
             cmd[..., 0] = p_des[0]
