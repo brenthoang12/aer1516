@@ -48,6 +48,8 @@ DEFAULT_MOVING_SPHERES = 0
 DEFAULT_MOTION = "circle"
 DEFAULT_SPHERE_RADIUS = 0.25
 DEFAULT_SPHERE_RGBA = (1.0, 0.0, 0.0, 1.0)
+DEFAULT_BOUNDARY_RGBA = (0.5, 0.7, 0.9, 0.12)
+DRONE_SAFETY_RADIUS = 0.08
 OBSTACLE_BODY_MASS = 0.15
 OBSTACLE_POS_KP = 10.0
 OBSTACLE_VEL_KD = 6.0
@@ -200,6 +202,18 @@ def parse_map(map_xml: Path):
     goal = parse_vec(goal_body.attrib["pos"], 3)[:2]
 
     static_boxes = []
+    for wall_geom in (wall_xn, wall_xp, wall_yn, wall_yp):
+        wall_pos = parse_vec(wall_geom.attrib["pos"], 3)
+        wall_size = parse_vec(wall_geom.attrib["size"], 3)
+        static_boxes.append({
+            "name": wall_geom.attrib["name"],
+            "center": wall_pos[:2],
+            "half_extents": wall_size[:2],
+            "angle_deg": 0.0,
+            "z": float(wall_pos[2]),
+            "rgba": rgba_or_default(wall_geom.attrib.get("rgba"), DEFAULT_BOUNDARY_RGBA),
+        })
+
     static_spheres = []
     for body in worldbody.findall("body"):
         name = body.attrib.get("name", "")
@@ -278,6 +292,12 @@ def create_runtime_map(map_xml: Path, moving_spheres):
     worldbody = root.find("worldbody")
     if worldbody is None:
         raise ValueError(f"{map_xml} is missing <worldbody>.")
+
+    for geom_name in ("ceiling", "wall_xn", "wall_xp", "wall_yn", "wall_yp"):
+        geom = worldbody.find(f"./geom[@name='{geom_name}']")
+        if geom is not None:
+            geom.attrib["contype"] = "1"
+            geom.attrib["conaffinity"] = "1"
 
     for obstacle in moving_spheres:
         body = ET.SubElement(
@@ -544,7 +564,7 @@ def sphere_repulsion_2d(p, sphere, eta, Qstar):
     radius = sphere.radius if isinstance(sphere, MovingSphere) else sphere["radius"]
     diff = p - center
     center_dist = np.linalg.norm(diff)
-    surface_dist = center_dist - radius
+    surface_dist = center_dist - radius - DRONE_SAFETY_RADIUS
 
     if surface_dist < 1e-6:
         if center_dist < 1e-9:
@@ -580,13 +600,17 @@ def wall_repulsion_2d(p, wall, eta, Qstar):
     local_p = wall_local_point(p, wall)
     local_closest = np.clip(local_p, -wall["half_extents"], wall["half_extents"])
     local_diff = local_p - local_closest
-    dist = np.linalg.norm(local_diff)
+    raw_dist = np.linalg.norm(local_diff)
+    dist = raw_dist - DRONE_SAFETY_RADIUS
 
     if dist < 1e-6:
-        pen = wall["half_extents"] - np.abs(local_p)
-        axis = int(np.argmin(pen))
-        local_direction = np.zeros(2)
-        local_direction[axis] = 1.0 if local_p[axis] >= 0.0 else -1.0
+        if raw_dist < 1e-6:
+            pen = wall["half_extents"] - np.abs(local_p)
+            axis = int(np.argmin(pen))
+            local_direction = np.zeros(2)
+            local_direction[axis] = 1.0 if local_p[axis] >= 0.0 else -1.0
+        else:
+            local_direction = local_diff / (raw_dist + 1e-9)
         world_direction = rotmat(np.deg2rad(wall["angle_deg"])) @ local_direction
         world_direction /= np.linalg.norm(world_direction) + 1e-9
         return eta * (1.0 / 1e-6 - 1.0 / Qstar) * (1.0 / (1e-6 ** 2)) * world_direction
@@ -602,6 +626,74 @@ def wall_polygon(wall):
     hx, hy = wall["half_extents"]
     local_corners = np.array([[-hx, -hy], [hx, -hy], [hx, hy], [-hx, hy], [-hx, -hy]])
     return np.array([wall_world_point(corner, wall) for corner in local_corners])
+
+
+def project_point_out_of_sphere(p, sphere, clearance):
+    center = sphere.center if isinstance(sphere, MovingSphere) else sphere["center"]
+    radius = sphere.radius if isinstance(sphere, MovingSphere) else sphere["radius"]
+    diff = p - center
+    dist = np.linalg.norm(diff)
+    min_dist = radius + clearance
+    if dist >= min_dist:
+        return p, False
+    if dist < 1e-9:
+        direction = np.array([1.0, 0.0])
+    else:
+        direction = diff / dist
+    return center + direction * min_dist, True
+
+
+def project_point_out_of_wall(p, wall, clearance):
+    local_p = wall_local_point(p, wall)
+    local_closest = np.clip(local_p, -wall["half_extents"], wall["half_extents"])
+    local_diff = local_p - local_closest
+    raw_dist = np.linalg.norm(local_diff)
+
+    if raw_dist >= clearance:
+        return p, False
+
+    if raw_dist < 1e-9:
+        pen = wall["half_extents"] - np.abs(local_p)
+        axis = int(np.argmin(pen))
+        local_direction = np.zeros(2)
+        local_direction[axis] = 1.0 if local_p[axis] >= 0.0 else -1.0
+    else:
+        local_direction = local_diff / raw_dist
+
+    local_target = local_closest + local_direction * clearance
+    return wall_world_point(local_target, wall), True
+
+
+def project_point_to_free_space(p, moving_spheres, clearance=DRONE_SAFETY_RADIUS):
+    projected = np.array(p, dtype=float)
+    projected[0] = np.clip(projected[0], WORLD_MIN[0] + clearance, WORLD_MAX[0] - clearance)
+    projected[1] = np.clip(projected[1], WORLD_MIN[1] + clearance, WORLD_MAX[1] - clearance)
+
+    for _ in range(3):
+        moved = False
+        for sphere in [*STATIC_SPHERE_OBSTACLES, *moving_spheres]:
+            projected, hit = project_point_out_of_sphere(projected, sphere, clearance)
+            moved = moved or hit
+        for wall in STATIC_BOX_OBSTACLES:
+            projected, hit = project_point_out_of_wall(projected, wall, clearance)
+            moved = moved or hit
+        projected[0] = np.clip(projected[0], WORLD_MIN[0] + clearance, WORLD_MAX[0] - clearance)
+        projected[1] = np.clip(projected[1], WORLD_MIN[1] + clearance, WORLD_MAX[1] - clearance)
+        if not moved:
+            break
+
+    return projected
+
+
+def enforce_drone_clearance(sim, moving_spheres, drone_idx=0):
+    pos = np.array(sim.data.states.pos[0, drone_idx], dtype=float)
+    projected_xy = project_point_to_free_space(pos[:2], moving_spheres)
+    if np.linalg.norm(projected_xy - pos[:2]) < 1e-9:
+        return
+
+    pos_array = sim.data.states.pos.at[0, drone_idx, :2].set(jnp.array(projected_xy))
+    vel_array = sim.data.states.vel.at[0, drone_idx, :2].set(jnp.zeros(2))
+    sim.data = sim.data.replace(states=sim.data.states.replace(pos=pos_array, vel=vel_array))
 
 
 def apf_gradient(p, theta, moving_spheres, params, safe_apf=True):
@@ -628,7 +720,7 @@ def apf_gradient(p, theta, moving_spheres, params, safe_apf=True):
     # -----------------------------
     for sphere in [*STATIC_SPHERE_OBSTACLES, *moving_spheres]:
         nearest = sphere_nearest_point(p, sphere)
-        dist = max(np.linalg.norm(p - nearest), 1e-6)
+        dist = max(np.linalg.norm(p - nearest) - DRONE_SAFETY_RADIUS, 1e-6)
         if dist > Qstar:
             continue
 
@@ -658,7 +750,7 @@ def apf_gradient(p, theta, moving_spheres, params, safe_apf=True):
     # -----------------------------
     for wall in STATIC_BOX_OBSTACLES:
         nearest = wall_nearest_point(p, wall)
-        dist = max(np.linalg.norm(p - nearest), 1e-6)
+        dist = max(np.linalg.norm(p - nearest) - DRONE_SAFETY_RADIUS, 1e-6)
         if dist > Qstar:
             continue
 
@@ -690,14 +782,15 @@ def rollout_preview(start, theta, moving_spheres, params, safe_apf=True,
                     steps=PREVIEW_STEPS, step_gain=STEP_GAIN):
     path = [start.copy()]
     p = start.copy()
-    heading = theta
+    preview_theta = float(theta)
 
     for _ in range(steps):
         if np.linalg.norm(p - GOAL) < GOAL_TOL:
             break
 
-        # Pass safe_apf into APF
-        g = apf_gradient(p, heading, moving_spheres, params, safe_apf=safe_apf)
+        # Mirror the actual control loop: use the current drone yaw for Safe-APF,
+        # then step along the normalized descent direction and project to free space.
+        g = apf_gradient(p, preview_theta, moving_spheres, params, safe_apf=safe_apf)
 
         direction = -g
         norm_dir = np.linalg.norm(direction)
@@ -706,11 +799,7 @@ def rollout_preview(start, theta, moving_spheres, params, safe_apf=True,
 
         direction /= norm_dir
         p = p + step_gain * direction
-
-        p[0] = np.clip(p[0], WORLD_MIN[0] + 0.01, WORLD_MAX[0] - 0.01)
-        p[1] = np.clip(p[1], WORLD_MIN[1] + 0.01, WORLD_MAX[1] - 0.01)
-
-        heading = np.arctan2(direction[1], direction[0])
+        p = project_point_to_free_space(p, moving_spheres)
         path.append(p.copy())
 
     return np.array(path)
@@ -944,8 +1033,7 @@ def main():
                 direction = np.zeros(2)
 
             p_des = p + STEP_GAIN * direction
-            p_des[0] = np.clip(p_des[0], WORLD_MIN[0] + 0.01, WORLD_MAX[0] - 0.01)
-            p_des[1] = np.clip(p_des[1], WORLD_MIN[1] + 0.01, WORLD_MAX[1] - 0.01)
+            p_des = project_point_to_free_space(p_des, moving_spheres)
 
             cmd[..., 0] = p_des[0]
             cmd[..., 1] = p_des[1]
@@ -955,6 +1043,7 @@ def main():
 
             sim.state_control(cmd)
             sim.step(sim.freq // sim.control_freq)
+            enforce_drone_clearance(sim, moving_spheres)
 
             if (show_window or args.save_video) and (step * fps) % sim.control_freq < fps:
                 sync_drones_to_mj_data(sim, drone_handles)

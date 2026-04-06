@@ -21,77 +21,77 @@
 
         <!-- Eight vertical walls with equal x spacing across the middle third: x in [2, 4] -->
         <body name="corridor_wall_0" pos="0.0 3.5 0.0">
-            <geom type="box" size="0.05 2.5 0.5"
+            <geom type="box" size="0.05 2.0 0.5"
                   rgba="0.8 0.2 0.2 1"
                   contype="1" conaffinity="1"
                   density="1000"/>
         </body>
 
         <body name="corridor_wall_1" pos="0.6 3.5 0.0">
-            <geom type="box" size="0.05 2.5 0.5"
+            <geom type="box" size="0.05 2.0 0.5"
                   rgba="0.8 0.2 0.2 1"
                   contype="1" conaffinity="1"
                   density="1000"/>
         </body>
 
         <body name="corridor_wall_2" pos="1.2 3.5 0.0">
-            <geom type="box" size="0.05 2.5 0.5"
+            <geom type="box" size="0.05 2.0 0.5"
                   rgba="0.8 0.2 0.2 1"
                   contype="1" conaffinity="1"
                   density="1000"/>
         </body>
 
         <body name="corridor_wall_3" pos="1.8 3.5 0.0">
-            <geom type="box" size="0.05 2.5 0.5"
+            <geom type="box" size="0.05 2.0 0.5"
                   rgba="0.8 0.2 0.2 1"
                   contype="1" conaffinity="1"
                   density="1000"/>
         </body>
 
         <body name="corridor_wall_4" pos="2.4 3.5 0.0">
-            <geom type="box" size="0.05 2.5 0.5"
+            <geom type="box" size="0.05 2.0 0.5"
                   rgba="0.8 0.2 0.2 1"
                   contype="1" conaffinity="1"
                   density="1000"/>
         </body>
 
         <body name="corridor_wall_5" pos="3.0 3.5 0.0">
-            <geom type="box" size="0.05 2.5 0.5"
+            <geom type="box" size="0.05 2.0 0.5"
                   rgba="0.8 0.2 0.2 1"
                   contype="1" conaffinity="1"
                   density="1000"/>
         </body>
 
         <body name="corridor_wall_6" pos="3.6 3.5 0.0">
-            <geom type="box" size="0.05 2.5 0.5"
+            <geom type="box" size="0.05 2.0 0.5"
                   rgba="0.8 0.2 0.2 1"
                   contype="1" conaffinity="1"
                   density="1000"/>
         </body>
 
         <body name="corridor_wall_7" pos="4.2 3.5 0.0">
-            <geom type="box" size="0.05 2.5 0.5"
+            <geom type="box" size="0.05 2.0 0.5"
                   rgba="0.8 0.2 0.2 1"
                   contype="1" conaffinity="1"
                   density="1000"/>
         </body>
 
         <body name="corridor_wall_8" pos="4.8 3.5 0.0">
-            <geom type="box" size="0.05 2.5 0.5"
+            <geom type="box" size="0.05 2.0 0.5"
                   rgba="0.8 0.2 0.2 1"
                   contype="1" conaffinity="1"
                   density="1000"/>
         </body>
 
         <body name="corridor_wall_9" pos="5.4 3.5 0.0">
-            <geom type="box" size="0.05 2.5 0.5"
+            <geom type="box" size="0.05 2.0 0.5"
                   rgba="0.8 0.2 0.2 1"
                   contype="1" conaffinity="1"
                   density="1000"/>
         </body>
 
         <body name="corridor_wall_10" pos="6.0 3.5 0.0">
-            <geom type="box" size="0.05 2.5 0.5"
+            <geom type="box" size="0.05 2.0 0.5"
                   rgba="0.8 0.2 0.2 1"
                   contype="1" conaffinity="1"
                   density="1000"/>
