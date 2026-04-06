@@ -20,56 +20,89 @@ from gymnasium.envs.mujoco.mujoco_rendering import MujocoRenderer
 from crazyflow.control import Control
 from crazyflow.sim import Sim
 from crazyflow.sim.sim import use_box_collision
-from crazyflow.sim.visualize import draw_arrow, draw_line, draw_points
+from crazyflow.sim.visualize import draw_line, draw_points
 
 
-PREVIEW_STEPS = 12
-CTRL_FREQ = 100
-Z_REF = 0.5
-YAW_REF = 0.0
-STEP_GAIN = 0.05
-MAX_APF_STEP = 0.08
-GOAL_TOL = 0.05
+PREVIEW_STEPS = 12  # Number of rollout steps used for the preview-path visualization.
+CTRL_FREQ = 100  # Main APF control-loop frequency in Hz.
+Z_REF = 0.5  # Fixed commanded flight altitude.
+YAW_REF = 0.0  # Fixed commanded drone yaw.
+STEP_GAIN = 0.5  # Gain mapping APF gradient magnitude into commanded position step.
+MAX_APF_STEP = 0.08  # Hard cap on one APF position update for stability.
+GOAL_TOL = 0.05  # Goal radius at which the run is considered successful.
 
 FREE_CAM = {
     "lookat": np.array([2.540425, 3.509272, 0.366132]),
     "distance": 7.599483,
     "azimuth": 95.094340,
     "elevation": -24.189189,
-}
+}  # Default free-camera pose for live rendering and capture.
 
-CAPTURE_DIR = Path(__file__).resolve().parent / "captures"
-CAPTURE_FPS = 24
-CAPTURE_WIDTH = 1280
-CAPTURE_HEIGHT = 720
-CAPTURE_CAMERA = -1
+CAPTURE_DIR = Path(__file__).resolve().parent / "captures"  # Output folder for saved videos and plots.
+CAPTURE_FPS = 24  # Video capture frame rate.
+CAPTURE_WIDTH = 1280  # Render width for live view and capture.
+CAPTURE_HEIGHT = 720  # Render height for live view and capture.
+CAPTURE_CAMERA = -1  # Camera id used for rendering; -1 means free camera.
 
-DEFAULT_TIMEOUT = 50.0
-DEFAULT_MOVING_SPHERES = 0
-DEFAULT_MOTION = "circle"
-DEFAULT_SPHERE_RADIUS = 0.25
-DEFAULT_SPHERE_RGBA = (1.0, 0.0, 0.0, 1.0)
-DEFAULT_BOUNDARY_RGBA = (0.5, 0.7, 0.9, 0.12)
-# Effective drone radius used to inflate obstacles/walls in the repulsive APF.
-DRONE_SAFETY_RADIUS = 0.05
-OBSTACLE_BODY_MASS = 0.15
-OBSTACLE_POS_KP = 10.0
-OBSTACLE_VEL_KD = 6.0
-OBSTACLE_MAX_FORCE = 1.5
-ARROW_REFRESH_PERIOD = 4
-FIELD_SAMPLE_SNAP = 0.08
-MOVING_SAMPLE_SNAP = 0.10
-ARROW_RENDER_STYLE = "line"  # "cone" or "line"
+DEFAULT_TIMEOUT = 50.0  # Default simulation time limit in seconds.
+DEFAULT_MOVING_SPHERES = 0  # Default number of runtime moving-sphere obstacles.
+DEFAULT_MOTION = "circle"  # Default motion model for moving spheres.
+DEFAULT_SPHERE_RADIUS = 0.25  # Radius of runtime moving-sphere obstacles.
+DEFAULT_SPHERE_RGBA = (1.0, 0.0, 0.0, 1.0)  # Default color of moving-sphere obstacles.
+DEFAULT_BOUNDARY_RGBA = (0.5, 0.7, 0.9, 0.12)  # Default translucent color for map boundary walls.
+DRONE_SAFETY_RADIUS = 0.05  # Effective drone radius used to inflate obstacles/walls in the repulsive APF.
+OBSTACLE_BODY_MASS = 0.15  # Mass assigned to runtime rigid-body obstacle spheres.
+OBSTACLE_POS_KP = 10.0  # Position-tracking gain for rigid-body obstacle motion control.
+OBSTACLE_VEL_KD = 6.0  # Velocity damping gain for rigid-body obstacle motion control.
+OBSTACLE_MAX_FORCE = 1.5  # Maximum planar control force applied to moving rigid obstacles.
+ARROW_REFRESH_PERIOD = 4  # Render-frame interval between arrow overlay refreshes.
+FIELD_SAMPLE_SNAP = 0.08  # Spatial quantization used for local field-sample caching.
+MOVING_SAMPLE_SNAP = 0.10  # Spatial quantization used for moving-obstacle cache keys.
+ARROW_RENDER_STYLE = "cone"  # Force-field glyph style: "cone" or "line".
 
-GOAL = np.array([3.0, 3.0])
-WORLD_MIN = np.array([0.0, 0.0, 0.0])
-WORLD_MAX = np.array([6.0, 7.0, 3.0])
-STATIC_BOX_OBSTACLES = []
-STATIC_SPHERE_OBSTACLES = []
+GOAL = np.array([3.0, 3.0])  # Goal position in the xy plane; overwritten from the loaded map.
+WORLD_MIN = np.array([0.0, 0.0, 0.0])  # World lower bounds; overwritten from the loaded map.
+WORLD_MAX = np.array([6.0, 7.0, 3.0])  # World upper bounds; overwritten from the loaded map.
+STATIC_BOX_OBSTACLES = []  # Parsed static box obstacles, including boundary walls.
+STATIC_SPHERE_OBSTACLES = []  # Parsed static sphere obstacles from the map.
 
 
 def select_sim_device() -> str:
     return "gpu" if any(device.platform == "gpu" for device in jax.devices()) else "cpu"
+
+
+def draw_arrow(sim: Sim, p1, p2, radius=0.01, rgba=None, geom_type=mujoco.mjtGeom.mjGEOM_ARROW1):
+    """Draw a single connector-style arrow geom between two points.
+
+    This stays local to race.py so we do not need to modify the crazyflow repo.
+    """
+    if sim.viewer is None:
+        return
+
+    rgba = np.array([1.0, 0.0, 0.0, 1.0]) if rgba is None else rgba
+    geom = mujoco.MjvGeom()
+    mujoco.mjv_initGeom(
+        geom,
+        geom_type,
+        size=np.zeros(3, dtype=np.float64),
+        pos=np.zeros(3, dtype=np.float64),
+        mat=np.eye(3, dtype=np.float64).reshape(-1),
+        rgba=np.asarray(rgba, dtype=np.float32),
+    )
+    mujoco.mjv_connector(
+        geom,
+        geom_type,
+        radius,
+        np.asarray(p1, dtype=float),
+        np.asarray(p2, dtype=float),
+    )
+    sim.viewer.viewer.add_marker(
+        type=geom.type,
+        pos=np.asarray(geom.pos, dtype=np.float64).reshape(3),
+        size=np.asarray(geom.size, dtype=np.float64).reshape(3),
+        mat=np.asarray(geom.mat, dtype=np.float64).reshape(9),
+        rgba=np.asarray(geom.rgba, dtype=np.float32).reshape(4),
+    )
 
 
 @dataclass(frozen=True)
@@ -1198,7 +1231,7 @@ def main():
     refresh_moving_spheres_from_mj_data(sim, moving_spheres, obstacle_handles)
 
     params = dict(
-        zeta=2.0,                 # Attractive gain toward the goal.
+        zeta=6.0,                 # Attractive gain toward the goal.
         eta=0.09,                  # Repulsive gain for walls and obstacles.
         dstar=0.1,                # Goal distance where attraction saturates.
         Qstar=0.1,                # Obstacle influence distance for repulsion.
