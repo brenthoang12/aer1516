@@ -1224,6 +1224,11 @@ def main():
     use_box_collision(sim, enable=True)
     sim.reset()
 
+    sim.mj_model.vis.headlight.ambient[:] = [0.7, 0.7, 0.7]
+    sim.mj_model.vis.headlight.diffuse[:] = [0.9, 0.9, 0.9]
+    sim.mj_model.vis.headlight.specular[:] = [0.3, 0.3, 0.3]
+    sim.mj_model.vis.rgba.fog[:] = [0.9, 0.9, 0.9, 1.0]
+
     drone_handles = get_drone_handles(sim)
     obstacle_handles = get_obstacle_handles(sim, moving_spheres)
     sync_drones_to_mj_data(sim, drone_handles)
