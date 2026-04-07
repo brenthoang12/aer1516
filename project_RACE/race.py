@@ -29,15 +29,29 @@ Z_REF = 0.5  # Fixed commanded flight altitude.
 YAW_REF = 0.0  # Fixed commanded drone yaw.
 STEP_GAIN = 0.5  # Gain mapping APF gradient magnitude into commanded position step.
 MAX_APF_STEP = 0.08  # Hard cap on one APF position update for stability.
-GOAL_TOL = 0.25  # Goal radius at which the run is considered successful.
+GOAL_TOL = 0.35  # Goal radius at which the run is considered successful.
+
+# Default free-camera pose for live rendering and capture.
+# FREE_CAM = {
+#     "lookat": np.array([2.540425, 3.509272, 0.366132]),
+#     "distance": 7.599483,
+#     "azimuth": 95.094340,
+#     "elevation": -24.189189,
+# }  
+
+# FREE_CAM = {
+#     "lookat": np.array([2.886725, 4.075165, 0.503327]),
+#     "distance": 5.995684,
+#     "azimuth": -47.264151,
+#     "elevation": -47.072072,
+# }
 
 FREE_CAM = {
-    "lookat": np.array([2.540425, 3.509272, 0.366132]),
-    "distance": 7.599483,
-    "azimuth": 95.094340,
-    "elevation": -24.189189,
-}  # Default free-camera pose for live rendering and capture.
-
+    "lookat": np.array([2.710337, 3.912194, 0.131754]),
+    "distance": 7.496914,
+    "azimuth": -47.264151,
+    "elevation": -47.072072,
+}
 CAPTURE_DIR = Path(__file__).resolve().parent / "captures"  # Output folder for saved videos and plots.
 CAPTURE_FPS = 24  # Video capture frame rate.
 CAPTURE_WIDTH = 1280  # Render width for live view and capture.
@@ -801,7 +815,7 @@ def apf_gradient(p, theta, moving_spheres, params, safe_apf=True):
         else:
             drel = (dist - dsafe) / (dvort - dsafe)
 
-        gamma = 2.0 * np.pi * direction_sign * drel
+        gamma = 0.5 * np.pi * direction_sign * drel
         grad_rep_total += rotmat(gamma) @ grad_rep
 
     # -----------------------------
@@ -1236,7 +1250,7 @@ def main():
     refresh_moving_spheres_from_mj_data(sim, moving_spheres, obstacle_handles)
 
     params = dict(
-        zeta=6.0,                 # Attractive gain toward the goal.
+        zeta=30.0,                 # Attractive gain toward the goal.
         eta=0.09,                  # Repulsive gain for walls and obstacles.
         dstar=0.1,                # Goal distance where attraction saturates.
         Qstar=0.8,                # Obstacle influence distance for repulsion.
@@ -1320,7 +1334,10 @@ def main():
             CAPTURE_DIR.mkdir(parents=True, exist_ok=True)
             map_str = str(args.map_xml)
             map_str = map_str.replace(".", "")
-            output_stem = CAPTURE_DIR / f"safeapf_{map_str}_NumMovObs-{args.moving_spheres}_{args.motion}_{timestamp}"
+            preamb = "apf"
+            if args.safe_apf:
+                preamb = "safeapf"
+            output_stem = CAPTURE_DIR / f"{preamb}_{map_str}_NumMovObs-{args.moving_spheres}_{args.motion}_{timestamp}"
             output_path = output_stem.with_suffix(".mp4")
             iio.imwrite(output_path, video_frames, fps=CAPTURE_FPS)
             print(f"Saved capture to {output_path}")
