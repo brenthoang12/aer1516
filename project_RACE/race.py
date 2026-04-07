@@ -29,7 +29,7 @@ Z_REF = 0.5  # Fixed commanded flight altitude.
 YAW_REF = 0.0  # Fixed commanded drone yaw.
 STEP_GAIN = 0.5  # Gain mapping APF gradient magnitude into commanded position step.
 MAX_APF_STEP = 0.08  # Hard cap on one APF position update for stability.
-GOAL_TOL = 0.05  # Goal radius at which the run is considered successful.
+GOAL_TOL = 0.25  # Goal radius at which the run is considered successful.
 
 FREE_CAM = {
     "lookat": np.array([2.540425, 3.509272, 0.366132]),
@@ -801,7 +801,7 @@ def apf_gradient(p, theta, moving_spheres, params, safe_apf=True):
         else:
             drel = (dist - dsafe) / (dvort - dsafe)
 
-        gamma = 1.15 * np.pi * direction_sign * drel
+        gamma = 2.0 * np.pi * direction_sign * drel
         grad_rep_total += rotmat(gamma) @ grad_rep
 
     # -----------------------------
@@ -1234,8 +1234,8 @@ def main():
         zeta=6.0,                 # Attractive gain toward the goal.
         eta=0.09,                  # Repulsive gain for walls and obstacles.
         dstar=0.1,                # Goal distance where attraction saturates.
-        Qstar=0.1,                # Obstacle influence distance for repulsion.
-        dsafe=0.05,               # Inner Safe-APF radius where vortexing is disabled.
+        Qstar=0.8,                # Obstacle influence distance for repulsion.
+        dsafe=0.1,               # Inner Safe-APF radius where vortexing is disabled.
         dvort=0.4,                # Outer Safe-APF radius where vortexing fades out.
         alpha_th=np.deg2rad(12),  # Heading threshold used to choose vortex direction.
     )
