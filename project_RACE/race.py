@@ -16,6 +16,10 @@ import jax.numpy as jnp
 import mujoco
 import numpy as np
 from gymnasium.envs.mujoco.mujoco_rendering import MujocoRenderer
+try:
+    from mujoco.glfw import glfw as _glfw
+except ImportError:
+    _glfw = None
 
 from crazyflow.control import Control
 from crazyflow.sim import Sim
@@ -29,29 +33,17 @@ Z_REF = 0.5  # Fixed commanded flight altitude.
 YAW_REF = 0.0  # Fixed commanded drone yaw.
 STEP_GAIN = 0.5  # Gain mapping APF gradient magnitude into commanded position step.
 MAX_APF_STEP = 0.08  # Hard cap on one APF position update for stability.
-GOAL_TOL = 0.35  # Goal radius at which the run is considered successful.
-
-# Default free-camera pose for live rendering and capture.
-# FREE_CAM = {
-#     "lookat": np.array([2.540425, 3.509272, 0.366132]),
-#     "distance": 7.599483,
-#     "azimuth": 95.094340,
-#     "elevation": -24.189189,
-# }  
-
-# FREE_CAM = {
-#     "lookat": np.array([2.886725, 4.075165, 0.503327]),
-#     "distance": 5.995684,
-#     "azimuth": -47.264151,
-#     "elevation": -47.072072,
-# }
+GOAL_TOL = 0.25  # Goal radius at which the run is considered successful.
+LOOKAHEAD_DIST = 0.30  # Pure-pursuit lookahead distance along the preview path (metres).
+PREVIEW_CTRL_STEPS = 12  # Number of rollout steps used in the control-loop lookahead.
 
 FREE_CAM = {
-    "lookat": np.array([2.710337, 3.912194, 0.131754]),
-    "distance": 7.496914,
-    "azimuth": -47.264151,
-    "elevation": -47.072072,
-}
+    "lookat": np.array([2.540425, 3.509272, 0.366132]),
+    "distance": 7.599483,
+    "azimuth": 95.094340,
+    "elevation": -24.189189,
+}  # Default free-camera pose for live rendering and capture.
+
 CAPTURE_DIR = Path(__file__).resolve().parent / "captures"  # Output folder for saved videos and plots.
 CAPTURE_FPS = 24  # Video capture frame rate.
 CAPTURE_WIDTH = 1280  # Render width for live view and capture.
@@ -590,6 +582,41 @@ def render_live_scene(sim, mode="human", camera=-1, cam_config=None, width=1920,
     return sim.viewer.render(mode)
 
 
+def get_glfw_window(sim):
+    """Return the GLFW window handle from the human viewer, or None."""
+    if _glfw is None or sim.viewer is None:
+        return None
+    human_viewer = sim.viewer._viewers.get("human")
+    return getattr(human_viewer, "window", None)
+
+
+def handle_pause(sim, draw_fn=None):
+    """Block until P is pressed again (toggle). Optionally calls draw_fn before each render to keep overlays visible."""
+    window = get_glfw_window(sim)
+    if window is None:
+        return
+
+    print("[PAUSED] Press P to resume.")
+
+    # Drain the initial press so we don't immediately resume on key release
+    while _glfw.get_key(window, _glfw.KEY_P) == _glfw.PRESS:
+        _glfw.poll_events()
+
+    # Wait for a fresh press of P to resume
+    while True:
+        _glfw.poll_events()
+        if _glfw.window_should_close(window):
+            break
+        if _glfw.get_key(window, _glfw.KEY_P) == _glfw.PRESS:
+            # Drain again so the main loop doesn't re-trigger immediately
+            while _glfw.get_key(window, _glfw.KEY_P) == _glfw.PRESS:
+                _glfw.poll_events()
+            break
+        if draw_fn is not None:
+            draw_fn()
+        render_live_scene(sim, mode="human", camera=CAPTURE_CAMERA, cam_config=FREE_CAM, width=CAPTURE_WIDTH, height=CAPTURE_HEIGHT)
+
+
 def print_free_cam(sim):
     if sim.viewer is None:
         return
@@ -815,7 +842,7 @@ def apf_gradient(p, theta, moving_spheres, params, safe_apf=True):
         else:
             drel = (dist - dsafe) / (dvort - dsafe)
 
-        gamma = 0.5 * np.pi * direction_sign * drel
+        gamma = (np.pi / 2.0) * direction_sign * drel
         grad_rep_total += rotmat(gamma) @ grad_rep
 
     # -----------------------------
@@ -847,7 +874,7 @@ def apf_gradient(p, theta, moving_spheres, params, safe_apf=True):
         else:
             drel = (dist - dsafe) / (dvort - dsafe)
 
-        gamma = np.pi * direction_sign * drel
+        gamma = (np.pi / 2.0) * direction_sign * drel
         grad_rep_total += rotmat(gamma) @ grad_rep
 
     return grad_att + grad_rep_total
@@ -1249,15 +1276,17 @@ def main():
     mujoco.mj_forward(sim.mj_model, sim.mj_data)
     refresh_moving_spheres_from_mj_data(sim, moving_spheres, obstacle_handles)
 
-    params = dict(
-        zeta=30.0,                 # Attractive gain toward the goal.
-        eta=0.09,                  # Repulsive gain for walls and obstacles.
-        dstar=0.1,                # Goal distance where attraction saturates.
-        Qstar=0.8,                # Obstacle influence distance for repulsion.
-        dsafe=0.1,               # Inner Safe-APF radius where vortexing is disabled.
-        dvort=0.4,                # Outer Safe-APF radius where vortexing fades out.
-        alpha_th=np.deg2rad(12),  # Heading threshold used to choose vortex direction.
-    )
+    # params = dict(
+    #     zeta=6.0,                 # Attractive gain toward the goal.
+    #     eta=0.09,                  # Repulsive gain for walls and obstacles.
+    #     dstar=0.1,                # Goal distance where attraction saturates.
+    #     Qstar=0.8,                # Obstacle influence distance for repulsion.
+    #     dsafe=0.1,               # Inner Safe-APF radius where vortexing is disabled.
+    #     dvort=0.4,                # Outer Safe-APF radius where vortexing fades out.
+    #     alpha_th=np.deg2rad(12),  # Heading threshold used to choose vortex direction.
+    # )
+
+    params = dict(zeta=6.0, eta=0.09, dstar=0.1, Qstar=0.8, dsafe=0.1, dvort=0.4, alpha_th=np.deg2rad(12))
 
     fps = CAPTURE_FPS
     sim_steps = int(args.timeout * CTRL_FREQ)
@@ -1294,8 +1323,13 @@ def main():
                 print("Reached goal.")
                 break
 
-            g = apf_gradient(p, theta, moving_spheres, params, safe_apf=args.safe_apf)
-            p_des = p + apf_step_delta(g)
+            preview = rollout_preview(p, theta, moving_spheres, params,
+                                       safe_apf=args.safe_apf, steps=PREVIEW_CTRL_STEPS)
+            p_des = preview[-1]
+            for pt in preview[1:]:
+                if np.linalg.norm(pt - p) >= LOOKAHEAD_DIST:
+                    p_des = pt
+                    break
             p_des = project_point_to_free_space(p_des, moving_spheres)
 
             cmd[..., 0] = p_des[0]
@@ -1319,6 +1353,17 @@ def main():
                     ensure_render_target(sim, mode="human", camera=CAPTURE_CAMERA, cam_config=FREE_CAM, width=CAPTURE_WIDTH, height=CAPTURE_HEIGHT)
                     draw_scene(sim, preview_path, start_pos, p, drone_z, theta, moving_spheres, params, draw_arrows=args.draw_arrows, safe_apf=args.safe_apf, overlay_cache=overlay_cache)
                     render_live_scene(sim, mode="human", camera=CAPTURE_CAMERA, cam_config=FREE_CAM, width=CAPTURE_WIDTH, height=CAPTURE_HEIGHT)
+                    window = get_glfw_window(sim)
+                    if window is not None and _glfw.get_key(window, _glfw.KEY_P) == _glfw.PRESS:
+                        _preview = preview_path
+                        _p, _z, _th = p, drone_z, theta
+                        handle_pause(sim, draw_fn=lambda: draw_scene(
+                            sim, _preview, start_pos, _p, _z, _th,
+                            moving_spheres, params,
+                            draw_arrows=args.draw_arrows,
+                            safe_apf=args.safe_apf,
+                            overlay_cache=overlay_cache,
+                        ))
 
                 if args.save_video:
                     ensure_render_target(sim, mode="rgb_array", camera=CAPTURE_CAMERA, cam_config=FREE_CAM, width=CAPTURE_WIDTH, height=CAPTURE_HEIGHT)
@@ -1334,12 +1379,9 @@ def main():
             CAPTURE_DIR.mkdir(parents=True, exist_ok=True)
             map_str = str(args.map_xml)
             map_str = map_str.replace(".", "")
-            preamb = "apf"
-            if args.safe_apf:
-                preamb = "safeapf"
-            output_stem = CAPTURE_DIR / f"{preamb}_{map_str}_NumMovObs-{args.moving_spheres}_{args.motion}_{timestamp}"
+            output_stem = CAPTURE_DIR / f"safeapf_{map_str}_NumMovObs-{args.moving_spheres}_{args.motion}_{timestamp}"
             output_path = output_stem.with_suffix(".mp4")
-            iio.imwrite(output_path, video_frames, fps=CAPTURE_FPS)
+            iio.imwrite(output_path, np.stack(video_frames), fps=CAPTURE_FPS)
             print(f"Saved capture to {output_path}")
         print_free_cam(sim)
         sim.close()
