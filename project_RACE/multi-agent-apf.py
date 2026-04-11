@@ -22,7 +22,7 @@ PREVIEW_STEPS = 12
 CTRL_FREQ = 100
 Z_REF = 0.5
 YAW_REF = 0.0
-STEP_GAIN = 0.05
+STEP_GAIN = 0.1
 GOAL_TOL = 0.05
 
 FREE_CAM = {
@@ -44,6 +44,7 @@ DEFAULT_MOTION = "circle"
 DEFAULT_SPHERE_RADIUS = 0.25
 DEFAULT_SPHERE_RGBA = (1.0, 0.0, 0.0, 1.0)
 IDENTITY_QUAT = jnp.array([1.0, 0.0, 0.0, 0.0])
+DRONE_SAFETY_RADIUS = 0.05
 
 GOAL = np.array([3.0, 3.0])
 WORLD_MIN = np.array([0.0, 0.0, 0.0])
@@ -360,13 +361,13 @@ def sphere_repulsion_2d(p, sphere, eta, Qstar):
     radius = sphere.radius if isinstance(sphere, MovingSphere) else sphere["radius"]
     diff = p - center
     center_dist = np.linalg.norm(diff)
-    surface_dist = center_dist - radius
+    surface_dist = center_dist - radius - DRONE_SAFETY_RADIUS
 
     if surface_dist < 1e-6:
         if center_dist < 1e-9:
             direction = np.array([1.0, 0.0])
         else:
-            direction = diff / center_dist
+            direction = diff / (center_dist + 1e-9)
         return eta * (1.0 / 1e-6 - 1.0 / Qstar) * (1.0 / (1e-6 ** 2)) * direction
 
     if surface_dist > Qstar:
@@ -396,9 +397,10 @@ def wall_repulsion_2d(p, wall, eta, Qstar):
     local_p = wall_local_point(p, wall)
     local_closest = np.clip(local_p, -wall["half_extents"], wall["half_extents"])
     local_diff = local_p - local_closest
-    dist = np.linalg.norm(local_diff)
+    dist_center = np.linalg.norm(local_diff)
+    surface_dist = dist_center - DRONE_SAFETY_RADIUS
 
-    if dist < 1e-6:
+    if surface_dist < 1e-6:
         pen = wall["half_extents"] - np.abs(local_p)
         axis = int(np.argmin(pen))
         local_direction = np.zeros(2)
@@ -407,10 +409,10 @@ def wall_repulsion_2d(p, wall, eta, Qstar):
         world_direction /= np.linalg.norm(world_direction) + 1e-9
         return eta * (1.0 / 1e-6 - 1.0 / Qstar) * (1.0 / (1e-6 ** 2)) * world_direction
 
-    if dist > Qstar:
+    if surface_dist > Qstar:
         return np.zeros(2)
 
-    local_grad = eta * (1.0 / Qstar - 1.0 / dist) * (1.0 / (dist ** 2)) * local_diff
+    local_grad = eta * (1.0 / Qstar - 1.0 / surface_dist) * (1.0 / (surface_dist ** 2)) * local_diff
     return rotmat(np.deg2rad(wall["angle_deg"])) @ local_grad
 
 
@@ -421,14 +423,12 @@ def wall_polygon(wall):
 
 def apf_gradient(p, theta, moving_spheres, params, safe_apf=True, other_agents=None):
     """
-    APF / Safe‑APF gradient for a single agent at position p.
-
-    Components:
+    Stable APF / Safe‑APF gradient for a single agent at position p.
+    Includes:
     - Attractive potential to goal
-    - Repulsive potential from static + moving obstacles
-    - Safe‑APF vortex rotation (if safe_apf=True)
-    - Swarm repulsion (too close)
-    - Swarm attraction (too far)
+    - Repulsive potential from static + moving obstacles (with safety radius)
+    - Safe‑APF vortex rotation
+    - Stable Lennard‑Jones inter‑agent repulsion
     """
 
     # -----------------------------
@@ -441,19 +441,19 @@ def apf_gradient(p, theta, moving_spheres, params, safe_apf=True, other_agents=N
     dsafe    = params["dsafe"]
     dvort    = params["dvort"]
     alpha_th = params["alpha_th"]
+    max_norm = params["max_grad_norm"]
 
-    # Swarm parameters
-    d_min       = params.get("swarm_d_min", 0.5)   # desired minimum spacing
-    d_max       = params.get("swarm_d_max", 1.5)   # desired maximum spacing
-    rep_gain    = params.get("swarm_rep_gain", 2.0)
-    att_gain    = params.get("swarm_att_gain", 0.2)
-    max_norm    = params.get("max_grad_norm", 3.0)
+    # Lennard‑Jones swarm parameters (stable version)
+    d_star   = params.get("swarm_d_star", 0.9)
+    eps      = params.get("swarm_eps", 0.4)
+    lj_cut   = params.get("swarm_cutoff", 2.0)
 
     # -----------------------------
     # Attractive potential to goal
     # -----------------------------
     diff_goal = p - GOAL
     d_goal = np.linalg.norm(diff_goal)
+
     if d_goal <= dstar:
         grad_att = zeta * diff_goal
     else:
@@ -466,65 +466,90 @@ def apf_gradient(p, theta, moving_spheres, params, safe_apf=True, other_agents=N
     # -----------------------------
     for sphere in [*STATIC_SPHERE_OBSTACLES, *moving_spheres]:
         nearest = sphere_nearest_point(p, sphere)
-        dist = max(np.linalg.norm(p - nearest), 1e-6)
+        dist_center = np.linalg.norm(p - nearest)
+        dist = max(dist_center - DRONE_SAFETY_RADIUS, 1e-6)
+
         if dist > Qstar:
             continue
 
         grad_rep = sphere_repulsion_2d(p, sphere, eta, Qstar)
 
-        if not safe_apf:
-            grad_rep_total += grad_rep
-            continue
+        if safe_apf:
+            alpha = wrap(theta - np.arctan2(nearest[1] - p[1], nearest[0] - p[0]))
+            direction_sign = 1 if abs(alpha) <= alpha_th else -1
 
-        # Safe‑APF vortex rotation
-        alpha = wrap(theta - np.arctan2(nearest[1] - p[1], nearest[0] - p[0]))
-        direction_sign = 1 if abs(alpha) <= alpha_th else -1
+            if dist <= dsafe:
+                drel = 0.0
+            elif dist >= dvort:
+                drel = 1.0
+            else:
+                drel = (dist - dsafe) / (dvort - dsafe)
 
-        if dist <= dsafe:
-            drel = 0.0
-        elif dist >= dvort:
-            drel = 1.0
-        else:
-            drel = (dist - dsafe) / (dvort - dsafe)
+            gamma = 2.2 * np.pi * direction_sign * drel
+            grad_rep = rotmat(gamma) @ grad_rep
 
-        gamma = 1.15 * np.pi * direction_sign * drel
-        grad_rep_total += rotmat(gamma) @ grad_rep
+        grad_rep_total += grad_rep
 
     # -----------------------------
     # WALLS
     # -----------------------------
     for wall in STATIC_BOX_OBSTACLES:
         nearest = wall_nearest_point(p, wall)
-        dist = max(np.linalg.norm(p - nearest), 1e-6)
+        dist_center = np.linalg.norm(p - nearest)
+        dist = max(dist_center - DRONE_SAFETY_RADIUS, 1e-6)
+
         if dist > Qstar:
             continue
 
         grad_rep = wall_repulsion_2d(p, wall, eta, Qstar)
 
-        if not safe_apf:
-            grad_rep_total += grad_rep
-            continue
+        if safe_apf:
+            alpha = wrap(theta - np.arctan2(nearest[1] - p[1], nearest[0] - p[0]))
+            direction_sign = 1 if abs(alpha) <= alpha_th else -1
 
-        alpha = wrap(theta - np.arctan2(nearest[1] - p[1], nearest[0] - p[0]))
-        direction_sign = 1 if abs(alpha) <= alpha_th else -1
+            if dist <= dsafe:
+                drel = 0.0
+            elif dist >= dvort:
+                drel = 1.0
+            else:
+                drel = (dist - dsafe) / (dvort - dsafe)
 
-        if dist <= dsafe:
-            drel = 0.0
-        elif dist >= dvort:
-            drel = 1.0
-        else:
-            drel = (dist - dsafe) / (dvort - dsafe)
+            gamma = np.pi * direction_sign * drel
+            grad_rep = rotmat(gamma) @ grad_rep
 
-        gamma = np.pi * direction_sign * drel
-        grad_rep_total += rotmat(gamma) @ grad_rep
+        grad_rep_total += grad_rep
+
+    # -----------------------------
+    # LENNARD‑JONES (stable version)
+    # -----------------------------
+    if other_agents is not None:
+        for q in other_agents:
+            diff = p - q
+            d = np.linalg.norm(diff)
+
+            if d < 1e-3 or d > lj_cut:
+                continue
+
+            dir_vec = diff / (d + 1e-9)
+
+            # Pure repulsion when too close
+            if d < d_star:
+                force = eps * (1.0 / (d + 1e-6) - 1.0 / (d_star + 1e-6))
+                force = np.clip(force, 0.0, 1.0)
+                grad_rep_total += force * dir_vec
 
     # -----------------------------
     # Final gradient + clipping
     # -----------------------------
     grad = grad_att + grad_rep_total
     norm_grad = np.linalg.norm(grad)
+
     if norm_grad > max_norm:
         grad = grad * (max_norm / (norm_grad + 1e-9))
+
+    # Safety: prevent NaN/inf from poisoning the controller
+    if not np.isfinite(grad).all():
+        grad = np.zeros(2)
 
     return grad
 
@@ -648,6 +673,10 @@ def main():
 
     use_box_collision(sim, enable=True)
     sim.reset()
+    sim.mj_model.vis.headlight.ambient[:] = [0.7, 0.7, 0.7]
+    sim.mj_model.vis.headlight.diffuse[:] = [0.9, 0.9, 0.9]
+    sim.mj_model.vis.headlight.specular[:] = [0.3, 0.3, 0.3]
+    sim.mj_model.vis.rgba.fog[:] = [0.9, 0.9, 0.9, 1.0]
 
     # Multi-agent support
     N = sim.n_drones
@@ -658,8 +687,8 @@ def main():
     # APF + swarm parameters
     params = dict(
     zeta=1.0, eta=0.15, dstar=0.3, Qstar=0.7,
-    dsafe=0.18, dvort=0.45, alpha_th=np.deg2rad(12),
-    max_grad_norm=3.0,
+    dsafe=0.05, dvort=0.4, alpha_th=np.deg2rad(25),
+    max_grad_norm=4.0,
     )
 
     fps = CAPTURE_FPS
@@ -700,12 +729,24 @@ def main():
                 p_i = all_positions[i]
                 theta_i = all_yaws[i]
 
+                # Build list of all other agent positions for Lennard‑Jones
+                other_agents = [all_positions[j] for j in range(N) if j != i]
+
                 g = apf_gradient(
                     p_i, theta_i,
                     moving_spheres,
                     params,
-                    safe_apf=args.safe_apf
+                    safe_apf=args.safe_apf,
+                    other_agents=other_agents
                 )
+
+                # --- STUCK ESCAPE MECHANISM ---
+                if np.linalg.norm(g) < 0.05:
+                    to_goal = GOAL - p_i
+                    ng = np.linalg.norm(to_goal)
+                    if ng > 1e-6:
+                        g += 0.4 * (to_goal / ng)
+
 
                 direction = -g
                 norm_dir = np.linalg.norm(direction)
